@@ -1,0 +1,140 @@
+generator client {
+  provider = "prisma-client"
+  output   = "../generated/prisma"
+}
+
+datasource db {
+  provider = "postgresql"
+}
+
+enum UserStatus {
+  ACTIVE
+  INACTIVE
+}
+
+enum EmailStatus {
+  SCHEDULED
+  PROCESSING
+  SENT
+  FAILED
+  CANCELLED
+}
+
+enum RecipientStatus {
+  PENDING
+  PROCESSING
+  SENT
+  FAILED
+}
+
+model User {
+  id          String     @id @default(uuid())
+  googleId    String?    @unique
+  email       String     @unique
+  name        String
+  avatarUrl   String?
+  status      UserStatus @default(ACTIVE)
+
+  emailBatches EmailBatch[]
+  emails       Email[]
+  slackConnection SlackConnection?
+
+  createdAt   DateTime   @default(now())
+  updatedAt   DateTime   @updatedAt
+
+  @@index([email])
+  @@index([googleId])
+}
+
+model EmailBatch {
+  id              String    @id @default(uuid())
+  userId          String
+
+  name            String?
+  totalRecipients Int       @default(0)
+
+  startTime       DateTime
+  delaySeconds    Int       @default(0)
+  hourlyLimit     Int?
+
+  createdAt       DateTime  @default(now())
+  updatedAt       DateTime  @updatedAt
+
+  user            User      @relation(fields: [userId], references: [id], onDelete: Cascade)
+  emails          Email[]
+
+  @@index([userId])
+  @@index([startTime])
+}
+
+model Email {
+  id              String        @id @default(uuid())
+  userId          String
+  batchId         String
+
+  recipientEmail  String
+  recipientName   String?
+
+  subject         String
+  body            String
+
+  scheduledAt     DateTime
+  sentAt          DateTime?
+
+  status          EmailStatus   @default(SCHEDULED)
+  failureReason   String?
+
+  idempotencyKey  String        @unique
+  bullJobId       String?       @unique
+
+  attemptCount    Int           @default(0)
+
+  createdAt       DateTime      @default(now())
+  updatedAt       DateTime      @updatedAt
+
+  user            User          @relation(fields: [userId], references: [id], onDelete: Cascade)
+  batch           EmailBatch    @relation(fields: [batchId], references: [id], onDelete: Cascade)
+  recipient       EmailRecipient?
+
+  @@index([userId, status])
+  @@index([batchId])
+  @@index([scheduledAt])
+  @@index([recipientEmail])
+  @@index([status, scheduledAt])
+}
+
+model EmailRecipient {
+  id              String          @id @default(uuid())
+  emailId         String          @unique
+
+  email           String
+  name            String?
+
+  status          RecipientStatus @default(PENDING)
+  sentAt          DateTime?
+  failureReason   String?
+
+  createdAt       DateTime        @default(now())
+  updatedAt       DateTime        @updatedAt
+
+  emailRecord     Email           @relation(fields: [emailId], references: [id], onDelete: Cascade)
+
+  @@index([email])
+  @@index([status])
+}
+
+model SlackConnection {
+  id              String   @id @default(uuid())
+  userId          String   @unique
+
+  accessToken     String
+  teamId          String?
+  teamName        String?
+  channelId       String?
+  channelName     String?
+
+  connectedAt     DateTime @default(now())
+  updatedAt       DateTime @updatedAt
+
+  user            User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+}
