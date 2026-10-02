@@ -8,17 +8,32 @@ import {
 
 const router = Router();
 
-router.get("/google", passport.authenticate("google", {
-  scope: ["profile", "email"],
-  session: false,
-}));
+/* =========================================================
+   GOOGLE LOGIN
+========================================================= */
+
+router.get(
+  "/google",
+  passport.authenticate("google", {
+    scope: ["profile", "email"],
+    session: false,
+  }),
+);
+
+/* =========================================================
+   GOOGLE CALLBACK
+========================================================= */
 
 router.get(
   "/google/callback",
+
   passport.authenticate("google", {
     session: false,
-    failureRedirect: `${process.env.FRONTEND_URL ?? "http://localhost:5173"}/login?error=google_auth_failed`,
+
+    failureRedirect:
+      "http://localhost:5174/login?error=google_auth_failed",
   }),
+
   (req, res) => {
     const user = req.user as {
       id: string;
@@ -29,14 +44,26 @@ router.get(
 
     const token = createAuthToken(user);
 
-    const frontendUrl =
-      process.env.FRONTEND_URL ?? "http://localhost:5173";
+    /*
+     * IMPORTANT:
+     * The React frontend is running on port 5174.
+     *
+     * Therefore Google OAuth must return to the
+     * frontend, NOT to the backend on port 5000.
+     */
+    const frontendUrl = "http://localhost:5174";
 
     res.redirect(
-      `${frontendUrl}/auth/callback?token=${encodeURIComponent(token)}`,
+      `${frontendUrl}/auth/callback?token=${encodeURIComponent(
+        token,
+      )}`,
     );
   },
 );
+
+/* =========================================================
+   CURRENT USER
+========================================================= */
 
 router.get("/me", async (req, res) => {
   const authorization = req.headers.authorization;
@@ -46,31 +73,42 @@ router.get("/me", async (req, res) => {
       success: false,
       message: "Authentication required.",
     });
+
     return;
   }
 
   try {
-    const jwtToken = authorization.substring("Bearer ".length).trim();
+    const jwtToken = authorization
+      .substring("Bearer ".length)
+      .trim();
 
     const jwt = await import("jsonwebtoken");
 
     const secret = process.env.JWT_SECRET;
 
     if (!secret) {
-      throw new Error("JWT_SECRET is not configured.");
+      throw new Error(
+        "JWT_SECRET is not configured.",
+      );
     }
 
-    const decoded = jwt.default.verify(jwtToken, secret) as {
+    const decoded = jwt.default.verify(
+      jwtToken,
+      secret,
+    ) as {
       userId: string;
     };
 
-    const user = await getUserById(decoded.userId);
+    const user = await getUserById(
+      decoded.userId,
+    );
 
     if (!user) {
       res.status(401).json({
         success: false,
         message: "User not found.",
       });
+
       return;
     }
 
@@ -81,7 +119,8 @@ router.get("/me", async (req, res) => {
   } catch {
     res.status(401).json({
       success: false,
-      message: "Invalid or expired authentication token.",
+      message:
+        "Invalid or expired authentication token.",
     });
   }
 });

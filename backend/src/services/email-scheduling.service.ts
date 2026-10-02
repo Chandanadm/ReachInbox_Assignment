@@ -1,6 +1,7 @@
 import prisma from "../config/database.js";
 import { scheduleEmailJob } from "./queue-scheduling.service.js";
 import type { ScheduleEmailInput } from "../validators/email.validator.js";
+import { indexEmail } from "./elasticsearch.service.js";
 
 export const createEmailCampaign = async (
   userId: string,
@@ -77,6 +78,36 @@ export const createEmailCampaign = async (
       };
     },
   );
+
+  /*
+   * Index scheduled emails in Elasticsearch.
+   *
+   * Elasticsearch failure must not prevent the email
+   * campaign from being queued because PostgreSQL
+   * remains the source of truth.
+   */
+  for (const email of result.emails) {
+    try {
+      await indexEmail({
+        userId: email.userId,
+        emailId: email.id,
+        recipientEmail: email.recipientEmail,
+        recipientName: email.recipientName,
+        subject: email.subject,
+        body: email.body,
+        status: "SCHEDULED",
+        scheduledAt:
+          email.scheduledAt.toISOString(),
+        sentAt: null,
+        failureReason: null,
+      });
+    } catch (error) {
+      console.error(
+        `Elasticsearch indexing failed for scheduled email ${email.id}:`,
+        error,
+      );
+    }
+  }
 
   const queuedEmails = [];
 

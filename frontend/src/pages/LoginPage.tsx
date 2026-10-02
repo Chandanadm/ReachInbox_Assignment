@@ -1,6 +1,7 @@
 import { Mail } from "lucide-react";
 
-const API_URL = "http://localhost:5000";
+const API_URL =
+  "https://reachinbox-assignment-t7ms.onrender.com";
 
 const LoginPage = () => {
   const handleGoogleLogin = () => {

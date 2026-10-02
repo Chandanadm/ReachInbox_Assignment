@@ -1,22 +1,43 @@
 import {
+  Activity,
   CalendarClock,
   CheckCircle2,
+  ChevronDown,
   ChevronRight,
   Clock3,
+  Command,
+  ExternalLink,
+  FileText,
   LogOut,
   Mail,
   Menu,
   MessageSquare,
   Plus,
   RefreshCw,
+  Search,
   Send,
   Settings,
+  Sparkles,
+  TrendingUp,
+  Users,
   X,
+  Zap,
 } from "lucide-react";
-import { useEffect, useState } from "react";
+
+import {
+  useEffect,
+  useMemo,
+  useState,
+  type KeyboardEvent,
+} from "react";
+
 import axios from "axios";
 
 import ComposeEmailForm from "../components/ComposeEmailForm";
+
+/* =========================================================
+   TYPES
+========================================================= */
 
 interface User {
   id: string;
@@ -58,34 +79,265 @@ interface SentEmail {
   failureReason: string | null;
 }
 
-const API_URL = "http://localhost:5000";
+interface SearchResult {
+  emailId: string;
+  userId: string;
+  recipientEmail: string;
+  recipientName: string | null;
+  subject: string;
+  body: string;
+  status: string;
+  scheduledAt: string;
+  sentAt: string | null;
+  failureReason: string | null;
+}
+
+interface DashboardHealth {
+  api: "online" | "offline";
+  database: "connected" | "unknown";
+  search: "available" | "unavailable";
+  scheduler: "active" | "unknown";
+}
+
+interface ActivityItem {
+  id: string;
+  title: string;
+  description: string;
+  time: string;
+  type: "scheduled" | "sent" | "campaign";
+}
+
+interface QuickAction {
+  label: string;
+  description: string;
+  icon: React.ReactNode;
+  section: DashboardSection;
+}
+
+interface StatCardProps {
+  icon: React.ReactNode;
+  label: string;
+  value: string;
+  description: string;
+  trend?: string;
+  trendType?: "positive" | "neutral";
+}
+
+interface EmptyStateProps {
+  icon: React.ReactNode;
+  title: string;
+  description: string;
+  actionLabel?: string;
+  onAction?: () => void;
+}
+
+interface TableLoadingProps {
+  rows?: number;
+}
+
+interface StatusBadgeProps {
+  status: string;
+}
+
+/* =========================================================
+   CONFIGURATION
+========================================================= */
+const API_URL = "https://reachinbox-assignment-t7ms.onrender.com";
+
+const TOKEN_KEY = "reachinbox_token";
+
+const SEARCH_MIN_LENGTH = 2;
+
+const SEARCH_DEBOUNCE_MS = 350;
+
+const DASHBOARD_REFRESH_INTERVAL = 30000;
+
+/* =========================================================
+   SHARED DATE FORMATTERS
+   These are outside DashboardPage so all dashboard
+   components can safely use them.
+========================================================= */
+
+const formatDashboardDate = (
+  date: string | null,
+): string => {
+  if (!date) {
+    return "-";
+  }
+
+  const parsedDate = new Date(date);
+
+  if (Number.isNaN(parsedDate.getTime())) {
+    return "-";
+  }
+
+  return parsedDate.toLocaleString(
+    "en-IN",
+    {
+      dateStyle: "medium",
+      timeStyle: "short",
+    },
+  );
+};
+
+const formatDashboardShortDate = (
+  date: string | null,
+): string => {
+  if (!date) {
+    return "-";
+  }
+
+  const parsedDate = new Date(date);
+
+  if (Number.isNaN(parsedDate.getTime())) {
+    return "-";
+  }
+
+  return parsedDate.toLocaleDateString(
+    "en-IN",
+    {
+      day: "2-digit",
+      month: "short",
+    },
+  );
+};
+
+const formatDashboardTime = (
+  date: string | null,
+): string => {
+  if (!date) {
+    return "-";
+  }
+
+  const parsedDate = new Date(date);
+
+  if (Number.isNaN(parsedDate.getTime())) {
+    return "-";
+  }
+
+  return parsedDate.toLocaleTimeString(
+    "en-IN",
+    {
+      hour: "2-digit",
+      minute: "2-digit",
+    },
+  );
+};
+
+/* =========================================================
+   DASHBOARD PAGE
+========================================================= */
 
 const DashboardPage = () => {
-  const [user, setUser] = useState<User | null>(null);
-  const [loading, setLoading] = useState(true);
-  const [dataLoading, setDataLoading] = useState(true);
+  /* =======================================================
+     AUTHENTICATED USER
+  ======================================================= */
+
+  const [user, setUser] =
+    useState<User | null>(null);
+
+  const [loading, setLoading] =
+    useState(true);
+
+  /* =======================================================
+     DASHBOARD DATA
+  ======================================================= */
+
+  const [dataLoading, setDataLoading] =
+    useState(true);
+
+  const [stats, setStats] =
+    useState<EmailStats>({
+      scheduled: 0,
+      sent: 0,
+      campaigns: 0,
+    });
+
+  const [scheduledEmails, setScheduledEmails] =
+    useState<ScheduledEmail[]>([]);
+
+  const [sentEmails, setSentEmails] =
+    useState<SentEmail[]>([]);
+
+  const [dataError, setDataError] =
+    useState("");
+
+  /* =======================================================
+     NAVIGATION
+  ======================================================= */
 
   const [activeSection, setActiveSection] =
-    useState<DashboardSection>("overview");
+    useState<DashboardSection>(
+      "overview",
+    );
 
-  const [mobileMenuOpen, setMobileMenuOpen] = useState(false);
+  const [mobileMenuOpen, setMobileMenuOpen] =
+    useState(false);
 
-  const [stats, setStats] = useState<EmailStats>({
-    scheduled: 0,
-    sent: 0,
-    campaigns: 0,
-  });
+  /* =======================================================
+     SLACK
+  ======================================================= */
 
-  const [scheduledEmails, setScheduledEmails] = useState<ScheduledEmail[]>(
-    [],
-  );
+  const [slackLoading, setSlackLoading] =
+    useState(false);
 
-  const [sentEmails, setSentEmails] = useState<SentEmail[]>([]);
+  const [slackMessage, setSlackMessage] =
+    useState("");
 
-  const [dataError, setDataError] = useState("");
+  const [slackConnected, setSlackConnected] =
+    useState(false);
+
+  /* =======================================================
+     ELASTICSEARCH SEARCH
+  ======================================================= */
+
+  const [searchQuery, setSearchQuery] =
+    useState("");
+
+  const [searchResults, setSearchResults] =
+    useState<SearchResult[]>([]);
+
+  const [searchLoading, setSearchLoading] =
+    useState(false);
+
+  const [searchError, setSearchError] =
+    useState("");
+
+  const [searchOpen, setSearchOpen] =
+    useState(false);
+
+  const [searchFocused, setSearchFocused] =
+    useState(false);
+
+  /* =======================================================
+     DASHBOARD HEALTH
+  ======================================================= */
+
+  const [health, setHealth] =
+    useState<DashboardHealth>({
+      api: "online",
+      database: "connected",
+      search: "available",
+      scheduler: "active",
+    });
+
+  /* =======================================================
+     UI STATE
+  ======================================================= */
+
+  const [refreshing, setRefreshing] =
+    useState(false);
+
+  const [lastUpdated, setLastUpdated] =
+    useState<Date | null>(null);
+
+  /* =======================================================
+     LOAD DASHBOARD DATA
+  ======================================================= */
 
   const loadDashboardData = async () => {
-    const token = localStorage.getItem("reachinbox_token");
+    const token =
+      localStorage.getItem(TOKEN_KEY);
 
     if (!token) {
       return;
@@ -93,39 +345,111 @@ const DashboardPage = () => {
 
     try {
       setDataLoading(true);
+
       setDataError("");
 
       const headers = {
         Authorization: `Bearer ${token}`,
       };
 
-      const [statsResponse, scheduledResponse, sentResponse] =
-        await Promise.all([
-          axios.get(`${API_URL}/api/emails/stats`, {
+      const [
+        statsResponse,
+        scheduledResponse,
+        sentResponse,
+      ] = await Promise.all([
+        axios.get(
+          `${API_URL}/api/emails/stats`,
+          {
             headers,
-          }),
-          axios.get(`${API_URL}/api/emails/scheduled`, {
-            headers,
-          }),
-          axios.get(`${API_URL}/api/emails/sent`, {
-            headers,
-          }),
-        ]);
+          },
+        ),
 
-      setStats(statsResponse.data.data);
-      setScheduledEmails(scheduledResponse.data.data);
-      setSentEmails(sentResponse.data.data);
+        axios.get(
+          `${API_URL}/api/emails/scheduled`,
+          {
+            headers,
+          },
+        ),
+
+        axios.get(
+          `${API_URL}/api/emails/sent`,
+          {
+            headers,
+          },
+        ),
+      ]);
+
+      setStats(
+        statsResponse.data.data ?? {
+          scheduled: 0,
+          sent: 0,
+          campaigns: 0,
+        },
+      );
+
+      setScheduledEmails(
+        scheduledResponse.data.data ?? [],
+      );
+
+      setSentEmails(
+        sentResponse.data.data ?? [],
+      );
+
+      setHealth((current) => ({
+        ...current,
+        api: "online",
+        database: "connected",
+        scheduler: "active",
+      }));
+
+      setLastUpdated(new Date());
     } catch (error) {
-      console.error("Failed to load dashboard data:", error);
-      setDataError("Unable to refresh email data.");
+      console.error(
+        "Failed to load dashboard data:",
+        error,
+      );
+
+      setDataError(
+        "Unable to refresh email data. Please try again.",
+      );
+
+      setHealth((current) => ({
+        ...current,
+        api: "offline",
+      }));
     } finally {
       setDataLoading(false);
     }
   };
 
+  /* =======================================================
+     MANUAL REFRESH
+  ======================================================= */
+
+  const handleRefresh = async () => {
+    if (refreshing) {
+      return;
+    }
+
+    try {
+      setRefreshing(true);
+
+      await loadDashboardData();
+    } finally {
+      setRefreshing(false);
+    }
+  };
+
+  /* =======================================================
+     LOAD AUTHENTICATED USER
+  ======================================================= */
+
   useEffect(() => {
     const loadUser = async () => {
-      const token = localStorage.getItem("reachinbox_token");
+      const token =
+        localStorage.getItem(
+          TOKEN_KEY,
+        );
 
       if (!token) {
         window.location.href = "/login";
@@ -133,19 +457,30 @@ const DashboardPage = () => {
       }
 
       try {
-        const response = await axios.get(`${API_URL}/api/auth/me`, {
-          headers: {
-            Authorization: `Bearer ${token}`,
-          },
-        });
+        const response =
+          await axios.get(
+            `${API_URL}/api/auth/me`,
+            {
+              headers: {
+                Authorization:
+                  `Bearer ${token}`,
+              },
+            },
+          );
 
         setUser(response.data.user);
 
         await loadDashboardData();
       } catch (error) {
-        console.error("Failed to load user:", error);
+        console.error(
+          "Failed to load authenticated user:",
+          error,
+        );
 
-        localStorage.removeItem("reachinbox_token");
+        localStorage.removeItem(
+          TOKEN_KEY,
+        );
+
         window.location.href = "/login";
       } finally {
         setLoading(false);
@@ -155,1128 +490,4020 @@ const DashboardPage = () => {
     void loadUser();
   }, []);
 
+  /* =======================================================
+     AUTO REFRESH
+  ======================================================= */
+
+  useEffect(() => {
+    if (!user) {
+      return;
+    }
+
+    const refreshTimer =
+      window.setInterval(
+        () => {
+          void loadDashboardData();
+        },
+        DASHBOARD_REFRESH_INTERVAL,
+      );
+
+    return () => {
+      window.clearInterval(
+        refreshTimer,
+      );
+    };
+  }, [user]);
+
+  /* =======================================================
+     SLACK OAUTH CALLBACK
+  ======================================================= */
+
+  useEffect(() => {
+    const params =
+      new URLSearchParams(
+        window.location.search,
+      );
+
+    const slackStatus =
+      params.get("slack");
+
+    if (slackStatus === "connected") {
+      setActiveSection("slack");
+
+      setSlackConnected(true);
+
+      setSlackMessage(
+        "Slack connected successfully. You will receive notifications when an hourly sending limit is reached.",
+      );
+
+      window.history.replaceState(
+        {},
+        document.title,
+        window.location.pathname,
+      );
+    }
+
+    if (slackStatus === "error") {
+      setActiveSection("slack");
+
+      setSlackMessage(
+        "Unable to connect Slack. Please try again.",
+      );
+
+      window.history.replaceState(
+        {},
+        document.title,
+        window.location.pathname,
+      );
+    }
+  }, []);
+
+  /* =======================================================
+     CHECK SLACK CONNECTION
+  ======================================================= */
+
+  const checkSlackConnection = async () => {
+    const token =
+      localStorage.getItem(
+        TOKEN_KEY,
+      );
+
+    if (!token) {
+      return;
+    }
+
+    /*
+     * The current backend does not expose a
+     * dedicated Slack status endpoint.
+     *
+     * Therefore successful OAuth callback
+     * controls the connected state for this
+     * session.
+     */
+    try {
+      setSlackConnected(
+        (current) => current,
+      );
+    } catch (error) {
+      console.error(
+        "Failed to check Slack connection:",
+        error,
+      );
+    }
+  };
+
+  useEffect(() => {
+    void checkSlackConnection();
+  }, []);
+
+  /* =======================================================
+     LOGOUT
+  ======================================================= */
+
   const handleLogout = () => {
-    localStorage.removeItem("reachinbox_token");
+    localStorage.removeItem(
+      TOKEN_KEY,
+    );
+
     window.location.href = "/login";
   };
 
-  const handleNavigation = (section: DashboardSection) => {
+  /* =======================================================
+     NAVIGATION
+  ======================================================= */
+
+  const handleNavigation = (
+    section: DashboardSection,
+  ) => {
     setActiveSection(section);
+
     setMobileMenuOpen(false);
+
+    if (section !== "slack") {
+      setSlackMessage("");
+    }
 
     void loadDashboardData();
   };
 
-  const formatDate = (date: string | null) => {
-    if (!date) {
-      return "-";
+  /* =======================================================
+     SLACK CONNECT
+  ======================================================= */
+
+  const handleSlackConnect = async () => {
+    const token =
+      localStorage.getItem(
+        TOKEN_KEY,
+      );
+
+    if (!token) {
+      window.location.href = "/login";
+      return;
     }
 
-    return new Date(date).toLocaleString("en-IN", {
-      dateStyle: "medium",
-      timeStyle: "short",
-    });
+    try {
+      setSlackLoading(true);
+
+      setSlackMessage("");
+
+      const response =
+        await axios.get(
+          `${API_URL}/api/slack/authorize-url`,
+          {
+            headers: {
+              Authorization:
+                `Bearer ${token}`,
+            },
+          },
+        );
+
+      const authorizationUrl =
+        response.data.authorizationUrl;
+
+      if (!authorizationUrl) {
+        throw new Error(
+          "Slack authorization URL was not returned.",
+        );
+      }
+
+      window.location.href =
+        authorizationUrl;
+    } catch (error) {
+      console.error(
+        "Slack connection error:",
+        error,
+      );
+
+      setSlackMessage(
+        "Unable to start Slack connection. Please try again.",
+      );
+
+      setSlackLoading(false);
+    }
   };
+
+  /* =======================================================
+     SEARCH EMAILS WITH ELASTICSEARCH
+  ======================================================= */
+
+  const searchEmails = async (
+    query: string,
+  ) => {
+    const token =
+      localStorage.getItem(
+        TOKEN_KEY,
+      );
+
+    if (!token) {
+      return;
+    }
+
+    const trimmedQuery =
+      query.trim();
+
+    if (
+      trimmedQuery.length <
+      SEARCH_MIN_LENGTH
+    ) {
+      setSearchResults([]);
+
+      setSearchError("");
+
+      setSearchLoading(false);
+
+      return;
+    }
+
+    try {
+      setSearchLoading(true);
+
+      setSearchError("");
+
+      const response =
+        await axios.get(
+          `${API_URL}/api/search/emails`,
+          {
+            params: {
+              q: trimmedQuery,
+            },
+
+            headers: {
+              Authorization:
+                `Bearer ${token}`,
+            },
+          },
+        );
+
+      const results =
+        response.data.data ?? [];
+
+      setSearchResults(results);
+
+      setSearchOpen(true);
+
+      setHealth((current) => ({
+        ...current,
+        search: "available",
+      }));
+    } catch (error) {
+      console.error(
+        "Email search failed:",
+        error,
+      );
+
+      setSearchResults([]);
+
+      setSearchError(
+        "Search is temporarily unavailable.",
+      );
+
+      setHealth((current) => ({
+        ...current,
+        search: "unavailable",
+      }));
+    } finally {
+      setSearchLoading(false);
+    }
+  };
+
+  /* =======================================================
+     SEARCH DEBOUNCE
+  ======================================================= */
+
+  useEffect(() => {
+    const trimmedQuery =
+      searchQuery.trim();
+
+    if (
+      trimmedQuery.length <
+      SEARCH_MIN_LENGTH
+    ) {
+      setSearchResults([]);
+
+      setSearchOpen(false);
+
+      setSearchError("");
+
+      return;
+    }
+
+    const timer =
+      window.setTimeout(
+        () => {
+          void searchEmails(
+            trimmedQuery,
+          );
+        },
+        SEARCH_DEBOUNCE_MS,
+      );
+
+    return () => {
+      window.clearTimeout(timer);
+    };
+  }, [searchQuery]);
+
+  /* =======================================================
+     SEARCH KEYBOARD HANDLING
+  ======================================================= */
+
+  const handleSearchKeyDown = (
+    event: KeyboardEvent<HTMLInputElement>,
+  ) => {
+    if (event.key === "Escape") {
+      setSearchOpen(false);
+
+      setSearchQuery("");
+    }
+
+    if (
+      event.key === "Enter" &&
+      searchQuery.trim().length >=
+        SEARCH_MIN_LENGTH
+    ) {
+      void searchEmails(
+        searchQuery,
+      );
+
+      setSearchOpen(true);
+    }
+  };
+
+  /* =======================================================
+     SEARCH RESULT SELECTION
+  ======================================================= */
+
+  const handleSearchResultClick = (
+    result: SearchResult,
+  ) => {
+    setSearchOpen(false);
+
+    setSearchQuery("");
+
+    if (result.status === "SENT") {
+      setActiveSection("sent");
+    } else {
+      setActiveSection(
+        "scheduled",
+      );
+    }
+  };
+
+  /* =======================================================
+     CLEAR SEARCH
+  ======================================================= */
+
+  const clearSearch = () => {
+    setSearchQuery("");
+
+    setSearchResults([]);
+
+    setSearchError("");
+
+    setSearchOpen(false);
+  };
+
+  /* =======================================================
+     LOCAL DATE FORMATTERS
+     Used only inside DashboardPage itself.
+  ======================================================= */
+
+  const formatDate = (
+    date: string | null,
+  ) => {
+    return formatDashboardDate(date);
+  };
+
+  const formatShortDate = (
+    date: string | null,
+  ) => {
+    return formatDashboardShortDate(
+      date,
+    );
+  };
+
+  const formatTime = (
+    date: string | null,
+  ) => {
+    return formatDashboardTime(date);
+  };
+
+  /* =======================================================
+     FIRST NAME
+  ======================================================= */
+
+  const firstName = useMemo(() => {
+    if (!user?.name) {
+      return "there";
+    }
+
+    return (
+      user.name
+        .trim()
+        .split(/\s+/)[0] ??
+      "there"
+    );
+  }, [user]);
+
+  /* =======================================================
+     DELIVERY RATE
+  ======================================================= */
+
+  const deliveryRate = useMemo(() => {
+    const total =
+      stats.sent +
+      stats.scheduled;
+
+    if (total === 0) {
+      return 0;
+    }
+
+    return Math.round(
+      (stats.sent / total) *
+        100,
+    );
+  }, [
+    stats.sent,
+    stats.scheduled,
+  ]);
+
+  /* =======================================================
+     UPCOMING EMAIL
+  ======================================================= */
+
+  const nextScheduledEmail =
+    useMemo(() => {
+      if (
+        scheduledEmails.length ===
+        0
+      ) {
+        return null;
+      }
+
+      const sorted = [
+        ...scheduledEmails,
+      ].sort(
+        (first, second) =>
+          new Date(
+            first.scheduledAt,
+          ).getTime() -
+          new Date(
+            second.scheduledAt,
+          ).getTime(),
+      );
+
+      return sorted[0] ?? null;
+    }, [scheduledEmails]);
+
+  /* =======================================================
+     RECENT SENT EMAIL
+  ======================================================= */
+
+  const latestSentEmail =
+    useMemo(() => {
+      if (
+        sentEmails.length === 0
+      ) {
+        return null;
+      }
+
+      const sorted = [
+        ...sentEmails,
+      ].sort(
+        (first, second) => {
+          const firstTime =
+            first.sentAt
+              ? new Date(
+                  first.sentAt,
+                ).getTime()
+              : 0;
+
+          const secondTime =
+            second.sentAt
+              ? new Date(
+                  second.sentAt,
+                ).getTime()
+              : 0;
+
+          return (
+            secondTime -
+            firstTime
+          );
+        },
+      );
+
+      return sorted[0] ?? null;
+    }, [sentEmails]);
+
+  /* =======================================================
+     ACTIVITY FEED
+  ======================================================= */
+
+  const activityItems =
+    useMemo<ActivityItem[]>(
+      () => {
+        const scheduledActivity =
+          scheduledEmails
+            .slice(0, 5)
+            .map((email) => ({
+              id:
+                `scheduled-${email.id}`,
+              title:
+                email.recipientEmail,
+              description:
+                `Scheduled: ${email.subject}`,
+              time:
+                email.scheduledAt,
+              type:
+                "scheduled" as const,
+            }));
+
+        const sentActivity =
+          sentEmails
+            .slice(0, 5)
+            .map((email) => ({
+              id:
+                `sent-${email.id}`,
+              title:
+                email.recipientEmail,
+              description:
+                `Sent: ${email.subject}`,
+              time:
+                email.sentAt ??
+                new Date().toISOString(),
+              type:
+                "sent" as const,
+            }));
+
+        return [
+          ...scheduledActivity,
+          ...sentActivity,
+        ]
+          .sort(
+            (first, second) =>
+              new Date(
+                second.time,
+              ).getTime() -
+              new Date(
+                first.time,
+              ).getTime(),
+          )
+          .slice(0, 8);
+      },
+      [
+        scheduledEmails,
+        sentEmails,
+      ],
+    );
+
+  /* =======================================================
+     QUICK ACTIONS
+  ======================================================= */
+
+  const quickActions =
+    useMemo<QuickAction[]>(
+      () => [
+        {
+          label: "New Campaign",
+          description:
+            "Schedule a new email campaign",
+          icon: <Plus size={18} />,
+          section: "compose",
+        },
+
+        {
+          label:
+            "Scheduled Emails",
+          description:
+            "Review upcoming deliveries",
+          icon: (
+            <CalendarClock
+              size={18}
+            />
+          ),
+          section: "scheduled",
+        },
+
+        {
+          label: "Sent Emails",
+          description:
+            "View your delivery history",
+          icon: (
+            <Send size={18} />
+          ),
+          section: "sent",
+        },
+
+        {
+          label: "Slack Alerts",
+          description:
+            "Configure delivery notifications",
+          icon: (
+            <MessageSquare
+              size={18}
+            />
+          ),
+          section: "slack",
+        },
+      ],
+      [],
+    );
+
+  /* =======================================================
+     LOADING SCREEN
+  ======================================================= */
 
   if (loading) {
     return (
-      <>
-        <style>
-          {`
-            .reach-loading {
-              min-height: 100vh;
-              display: flex;
-              flex-direction: column;
-              align-items: center;
-              justify-content: center;
-              background:
-                radial-gradient(circle at 20% 20%, rgba(99,102,241,.16), transparent 30%),
-                radial-gradient(circle at 80% 80%, rgba(14,165,233,.13), transparent 30%),
-                #f8fafc;
-              color: #475569;
-              gap: 16px;
-            }
+      <div className="reach-loading">
+        <div className="reach-loader" />
 
-            .reach-loader {
-              width: 46px;
-              height: 46px;
-              border-radius: 50%;
-              border: 4px solid rgba(99,102,241,.15);
-              border-top-color: #6366f1;
-              animation: reach-spin .8s linear infinite;
-            }
+        <div className="reach-loading-content">
+          <div className="loading-brand-mark">
+            <Mail size={20} />
+          </div>
 
-            @keyframes reach-spin {
-              to { transform: rotate(360deg); }
-            }
-          `}
-        </style>
+          <strong>
+            ReachInbox
+          </strong>
 
-        <div className="reach-loading">
-          <div className="reach-loader" />
-          <p>Loading your workspace...</p>
+          <p>
+            Loading your workspace...
+          </p>
         </div>
-      </>
+      </div>
     );
   }
+
+  /* =======================================================
+     AUTH GUARD
+  ======================================================= */
 
   if (!user) {
     return null;
   }
 
+  /* =======================================================
+     MAIN DASHBOARD
+  ======================================================= */
+
   return (
-    <>
-      <style>
-        {`
-          .dashboard-shell {
-            position: relative;
-            min-height: 100vh;
-            overflow-x: hidden;
-            background:
-              radial-gradient(circle at 5% 5%, rgba(99,102,241,.09), transparent 25%),
-              radial-gradient(circle at 95% 90%, rgba(14,165,233,.08), transparent 25%),
-              #f8fafc;
+    <div className="dashboard-shell">
+
+      {/* ===================================================
+          MOBILE OVERLAY
+      =================================================== */}
+
+      {mobileMenuOpen && (
+        <button
+          type="button"
+          className="mobile-overlay"
+          aria-label="Close navigation"
+          onClick={() =>
+            setMobileMenuOpen(false)
           }
+        />
+      )}
 
-          .dashboard-shell::before {
-            content: "";
-            position: fixed;
-            width: 420px;
-            height: 420px;
-            border-radius: 50%;
-            background: rgba(99,102,241,.05);
-            filter: blur(80px);
-            top: -180px;
-            right: -120px;
-            pointer-events: none;
-            animation: floatingGlow 8s ease-in-out infinite;
-          }
+      {/* ===================================================
+          SIDEBAR
+      =================================================== */}
 
-          .dashboard-shell::after {
-            content: "";
-            position: fixed;
-            width: 320px;
-            height: 320px;
-            border-radius: 50%;
-            background: rgba(14,165,233,.05);
-            filter: blur(80px);
-            bottom: -120px;
-            left: 240px;
-            pointer-events: none;
-            animation: floatingGlow 10s ease-in-out infinite reverse;
-          }
+      <aside
+        className={`dashboard-sidebar ${
+          mobileMenuOpen
+            ? "sidebar-open"
+            : ""
+        }`}
+      >
 
-          @keyframes floatingGlow {
-            0%, 100% {
-              transform: translate3d(0,0,0);
-            }
-            50% {
-              transform: translate3d(0,20px,0);
-            }
-          }
+        {/* =================================================
+            SIDEBAR BRAND
+        ================================================= */}
 
-          .dashboard-main {
-            position: relative;
-            z-index: 1;
-          }
+        <div className="sidebar-brand">
 
-          .topbar-title h1 {
-            animation: titleIn .45s ease both;
-          }
+          <div className="sidebar-brand-mark">
+            <Mail
+              size={19}
+              strokeWidth={2.4}
+            />
+          </div>
 
-          .topbar-title p {
-            animation: titleIn .55s ease both;
-          }
+          <div className="sidebar-brand-content">
+            <strong>
+              ReachInbox
+            </strong>
 
-          @keyframes titleIn {
-            from {
-              opacity: 0;
-              transform: translateY(8px);
-            }
-            to {
-              opacity: 1;
-              transform: translateY(0);
-            }
-          }
+            <span>
+              EMAIL OPERATIONS
+            </span>
+          </div>
 
-          .dashboard-data-error {
-            display: flex;
-            align-items: center;
-            justify-content: space-between;
-            gap: 16px;
-            margin-bottom: 20px;
-            padding: 12px 16px;
-            border: 1px solid #fecaca;
-            border-radius: 14px;
-            background: rgba(254,242,242,.92);
-            color: #b91c1c;
-            font-size: 14px;
-          }
-
-          .dashboard-refresh-button {
-            display: inline-flex;
-            align-items: center;
-            gap: 7px;
-            border: 1px solid #e2e8f0;
-            border-radius: 10px;
-            padding: 8px 12px;
-            background: white;
-            color: #475569;
-            cursor: pointer;
-            transition: all .2s ease;
-          }
-
-          .dashboard-refresh-button:hover {
-            border-color: #c7d2fe;
-            background: #eef2ff;
-            color: #4f46e5;
-            transform: translateY(-1px);
-          }
-
-          .dashboard-refresh-icon {
-            animation: refreshSpin .8s linear infinite;
-          }
-
-          @keyframes refreshSpin {
-            to {
-              transform: rotate(360deg);
-            }
-          }
-
-          .stats-grid {
-            animation: cardsIn .55s ease both;
-          }
-
-          @keyframes cardsIn {
-            from {
-              opacity: 0;
-              transform: translateY(14px);
-            }
-            to {
-              opacity: 1;
-              transform: translateY(0);
-            }
-          }
-
-          .stat-card {
-            position: relative;
-            overflow: hidden;
-            transition:
-              transform .25s ease,
-              box-shadow .25s ease,
-              border-color .25s ease;
-          }
-
-          .stat-card::before {
-            content: "";
-            position: absolute;
-            width: 120px;
-            height: 120px;
-            border-radius: 50%;
-            background: rgba(99,102,241,.07);
-            top: -65px;
-            right: -55px;
-            transition: transform .3s ease;
-          }
-
-          .stat-card:hover {
-            transform: translateY(-5px);
-            box-shadow: 0 18px 45px rgba(15,23,42,.09);
-            border-color: #c7d2fe;
-          }
-
-          .stat-card:hover::before {
-            transform: scale(1.35);
-          }
-
-          .stat-icon {
-            transition: transform .25s ease;
-          }
-
-          .stat-card:hover .stat-icon {
-            transform: scale(1.08) rotate(-4deg);
-          }
-
-          .dashboard-panel {
-            animation: panelIn .5s ease both;
-          }
-
-          @keyframes panelIn {
-            from {
-              opacity: 0;
-              transform: translateY(10px);
-            }
-            to {
-              opacity: 1;
-              transform: translateY(0);
-            }
-          }
-
-          .table-container {
-            overflow: hidden;
-          }
-
-          .dashboard-table-row {
-            transition:
-              background .2s ease,
-              transform .2s ease;
-          }
-
-          .dashboard-table-row:hover {
-            background: #f8fafc;
-          }
-
-          .dashboard-table-row td {
-            transition: color .2s ease;
-          }
-
-          .status-pill {
-            display: inline-flex;
-            align-items: center;
-            gap: 6px;
-            border-radius: 999px;
-            padding: 5px 10px;
-            font-size: 12px;
-            font-weight: 600;
-          }
-
-          .status-dot {
-            width: 6px;
-            height: 6px;
-            border-radius: 50%;
-            background: currentColor;
-          }
-
-          .status-scheduled {
-            background: #eef2ff;
-            color: #4f46e5;
-          }
-
-          .status-processing {
-            background: #fff7ed;
-            color: #c2410c;
-          }
-
-          .status-sent {
-            background: #ecfdf5;
-            color: #047857;
-          }
-
-          .status-failed {
-            background: #fef2f2;
-            color: #dc2626;
-          }
-
-          .dashboard-count-badge {
-            display: inline-flex;
-            min-width: 28px;
-            height: 28px;
-            align-items: center;
-            justify-content: center;
-            border-radius: 999px;
-            background: #eef2ff;
-            color: #4f46e5;
-            font-size: 12px;
-            font-weight: 700;
-          }
-
-          .dashboard-table-email {
-            display: flex;
-            align-items: center;
-            gap: 10px;
-            min-width: 0;
-          }
-
-          .dashboard-email-avatar {
-            width: 34px;
-            height: 34px;
-            flex: 0 0 34px;
-            display: flex;
-            align-items: center;
-            justify-content: center;
-            border-radius: 10px;
-            background: linear-gradient(135deg, #eef2ff, #e0f2fe);
-            color: #4f46e5;
-          }
-
-          .dashboard-email-text {
-            overflow: hidden;
-            text-overflow: ellipsis;
-            white-space: nowrap;
-          }
-
-          .dashboard-skeleton {
-            height: 17px;
-            border-radius: 7px;
-            background: linear-gradient(
-              90deg,
-              #f1f5f9 25%,
-              #e2e8f0 50%,
-              #f1f5f9 75%
-            );
-            background-size: 200% 100%;
-            animation: skeleton 1.4s infinite;
-          }
-
-          @keyframes skeleton {
-            to {
-              background-position: -200% 0;
-            }
-          }
-
-          .dashboard-empty-icon {
-            animation: emptyFloat 3s ease-in-out infinite;
-          }
-
-          @keyframes emptyFloat {
-            0%, 100% {
-              transform: translateY(0);
-            }
-            50% {
-              transform: translateY(-5px);
-            }
-          }
-
-          .sidebar-brand-icon {
-            transition: transform .25s ease;
-          }
-
-          .sidebar-brand:hover .sidebar-brand-icon {
-            transform: rotate(-6deg) scale(1.06);
-          }
-
-          .nav-item {
-            transition:
-              transform .2s ease,
-              background .2s ease,
-              color .2s ease;
-          }
-
-          .nav-item:hover {
-            transform: translateX(3px);
-          }
-
-          .topbar-compose-button,
-          .primary-button {
-            transition:
-              transform .2s ease,
-              box-shadow .2s ease;
-          }
-
-          .topbar-compose-button:hover,
-          .primary-button:hover {
-            transform: translateY(-2px);
-            box-shadow: 0 10px 25px rgba(79,70,229,.18);
-          }
-
-          .welcome-section {
-            animation: welcomeIn .5s ease both;
-          }
-
-          @keyframes welcomeIn {
-            from {
-              opacity: 0;
-              transform: translateY(12px);
-            }
-            to {
-              opacity: 1;
-              transform: translateY(0);
-            }
-          }
-
-          @media (max-width: 768px) {
-            .dashboard-data-error {
-              align-items: flex-start;
-              flex-direction: column;
-            }
-
-            .dashboard-table-email {
-              max-width: 220px;
-            }
-          }
-        `}
-      </style>
-
-      <div className="dashboard-shell">
-        {mobileMenuOpen && (
           <button
             type="button"
-            className="mobile-overlay"
-            aria-label="Close navigation"
-            onClick={() => setMobileMenuOpen(false)}
-          />
-        )}
+            className="mobile-close-button"
+            onClick={() =>
+              setMobileMenuOpen(
+                false,
+              )
+            }
+            aria-label="Close menu"
+          >
+            <X size={20} />
+          </button>
+        </div>
 
-        <aside
-          className={`dashboard-sidebar ${
-            mobileMenuOpen ? "sidebar-open" : ""
-          }`}
-        >
-          <div className="sidebar-brand">
-            <div className="sidebar-brand-icon">
-              <Mail size={20} />
-            </div>
+        {/* =================================================
+            WORKSPACE NAVIGATION
+        ================================================= */}
 
-            <span>ReachInbox</span>
+        <nav className="sidebar-nav">
 
-            <button
-              type="button"
-              className="mobile-close-button"
-              onClick={() => setMobileMenuOpen(false)}
-              aria-label="Close menu"
-            >
-              <X size={20} />
-            </button>
-          </div>
+          <p className="nav-label">
+            WORKSPACE
+          </p>
 
-          <nav className="sidebar-nav">
-            <p className="nav-label">WORKSPACE</p>
+          <button
+            type="button"
+            className={`nav-item ${
+              activeSection ===
+              "overview"
+                ? "active"
+                : ""
+            }`}
+            onClick={() =>
+              handleNavigation(
+                "overview",
+              )
+            }
+          >
+            <Activity size={18} />
 
-            <button
-              type="button"
-              className={`nav-item ${
-                activeSection === "overview" ? "active" : ""
-              }`}
-              onClick={() => handleNavigation("overview")}
-            >
-              <Mail size={18} />
-              <span>Overview</span>
-            </button>
+            <span>
+              Overview
+            </span>
+          </button>
 
-            <button
-              type="button"
-              className={`nav-item ${
-                activeSection === "scheduled" ? "active" : ""
-              }`}
-              onClick={() => handleNavigation("scheduled")}
-            >
-              <CalendarClock size={18} />
-              <span>Scheduled Emails</span>
+          <button
+            type="button"
+            className={`nav-item ${
+              activeSection ===
+              "scheduled"
+                ? "active"
+                : ""
+            }`}
+            onClick={() =>
+              handleNavigation(
+                "scheduled",
+              )
+            }
+          >
+            <CalendarClock
+              size={18}
+            />
 
-              {stats.scheduled > 0 && (
-                <span className="dashboard-count-badge">
-                  {stats.scheduled}
-                </span>
-              )}
-            </button>
+            <span>
+              Scheduled Emails
+            </span>
 
-            <button
-              type="button"
-              className={`nav-item ${
-                activeSection === "sent" ? "active" : ""
-              }`}
-              onClick={() => handleNavigation("sent")}
-            >
-              <Send size={18} />
-              <span>Sent Emails</span>
+            {stats.scheduled >
+              0 && (
+              <span className="dashboard-count-badge">
+                {stats.scheduled}
+              </span>
+            )}
+          </button>
 
-              {stats.sent > 0 && (
-                <span className="dashboard-count-badge">
-                  {stats.sent}
-                </span>
-              )}
-            </button>
+          <button
+            type="button"
+            className={`nav-item ${
+              activeSection ===
+              "sent"
+                ? "active"
+                : ""
+            }`}
+            onClick={() =>
+              handleNavigation(
+                "sent",
+              )
+            }
+          >
+            <Send size={18} />
 
-            <p className="nav-label nav-label-spaced">CAMPAIGNS</p>
+            <span>
+              Sent Emails
+            </span>
 
-            <button
-              type="button"
-              className={`nav-item ${
-                activeSection === "compose" ? "active" : ""
-              }`}
-              onClick={() => handleNavigation("compose")}
-            >
-              <Plus size={18} />
-              <span>Compose New Email</span>
-            </button>
+            {stats.sent > 0 && (
+              <span className="dashboard-count-badge">
+                {stats.sent}
+              </span>
+            )}
+          </button>
 
-            <p className="nav-label nav-label-spaced">INTEGRATIONS</p>
+          {/* ===============================================
+              CAMPAIGNS
+          =============================================== */}
 
-            <button
-              type="button"
-              className={`nav-item ${
-                activeSection === "slack" ? "active" : ""
-              }`}
-              onClick={() => handleNavigation("slack")}
-            >
-              <MessageSquare size={18} />
-              <span>Slack</span>
-            </button>
-          </nav>
+          <p className="nav-label nav-label-spaced">
+            CAMPAIGNS
+          </p>
 
-          <div className="sidebar-bottom">
-            <button type="button" className="nav-item">
-              <Settings size={18} />
-              <span>Settings</span>
-            </button>
+          <button
+            type="button"
+            className={`nav-item ${
+              activeSection ===
+              "compose"
+                ? "active"
+                : ""
+            }`}
+            onClick={() =>
+              handleNavigation(
+                "compose",
+              )
+            }
+          >
+            <Plus size={18} />
 
-            <div className="sidebar-user">
-              {user.avatarUrl ? (
-                <img
-                  src={user.avatarUrl}
-                  alt={user.name}
-                  className="sidebar-avatar"
-                />
-              ) : (
-                <div className="sidebar-avatar sidebar-avatar-fallback">
-                  {user.name.charAt(0).toUpperCase()}
-                </div>
-              )}
+            <span>
+              New Campaign
+            </span>
+          </button>
 
-              <div className="sidebar-user-info">
-                <strong>{user.name}</strong>
-                <span>{user.email}</span>
+          {/* ===============================================
+              INTEGRATIONS
+          =============================================== */}
+
+          <p className="nav-label nav-label-spaced">
+            INTEGRATIONS
+          </p>
+
+          <button
+            type="button"
+            className={`nav-item ${
+              activeSection ===
+              "slack"
+                ? "active"
+                : ""
+            }`}
+            onClick={() =>
+              handleNavigation(
+                "slack",
+              )
+            }
+          >
+            <MessageSquare
+              size={18}
+            />
+
+            <span>
+              Slack
+            </span>
+
+            {slackConnected && (
+              <span className="integration-status-dot" />
+            )}
+          </button>
+        </nav>
+
+        {/* =================================================
+            SIDEBAR BOTTOM
+        ================================================= */}
+
+        <div className="sidebar-bottom">
+
+          <button
+            type="button"
+            className="nav-item sidebar-settings"
+          >
+            <Settings size={18} />
+
+            <span>
+              Settings
+            </span>
+          </button>
+
+          <div className="sidebar-user">
+
+            {user.avatarUrl ? (
+              <img
+                src={user.avatarUrl}
+                alt={user.name}
+                className="sidebar-avatar"
+              />
+            ) : (
+              <div className="sidebar-avatar sidebar-avatar-fallback">
+                {user.name
+                  .charAt(0)
+                  .toUpperCase()}
               </div>
+            )}
 
-              <button
-                type="button"
-                className="sidebar-logout"
-                onClick={handleLogout}
-                title="Logout"
-                aria-label="Logout"
-              >
-                <LogOut size={17} />
-              </button>
+            <div className="sidebar-user-info">
+              <strong>
+                {user.name}
+              </strong>
+
+              <span>
+                {user.email}
+              </span>
             </div>
-          </div>
-        </aside>
 
-        <main className="dashboard-main">
-          <header className="dashboard-topbar">
             <button
               type="button"
-              className="mobile-menu-button"
-              onClick={() => setMobileMenuOpen(true)}
-              aria-label="Open navigation"
+              className="sidebar-logout"
+              onClick={
+                handleLogout
+              }
+              title="Logout"
+              aria-label="Logout"
             >
-              <Menu size={22} />
+              <LogOut size={17} />
             </button>
 
-            <div className="topbar-title">
+          </div>
+        </div>
+      </aside>
+
+      {/* ===================================================
+          MAIN CONTENT
+      =================================================== */}
+
+      <main className="dashboard-main">
+
+        {/* =================================================
+            TOPBAR
+        ================================================= */}
+
+        <header className="dashboard-topbar">
+
+          <button
+            type="button"
+            className="mobile-menu-button"
+            onClick={() =>
+              setMobileMenuOpen(
+                true,
+              )
+            }
+            aria-label="Open navigation"
+          >
+            <Menu size={22} />
+          </button>
+
+          <div className="topbar-title">
+
+            <div className="topbar-heading-row">
+
+              <span className="topbar-status-dot" />
+
               <h1>
-                {activeSection === "overview" && "Overview"}
-                {activeSection === "scheduled" && "Scheduled Emails"}
-                {activeSection === "sent" && "Sent Emails"}
-                {activeSection === "compose" && "Compose New Email"}
-                {activeSection === "slack" && "Slack Integration"}
+                {activeSection ===
+                  "overview" &&
+                  "Overview"}
+
+                {activeSection ===
+                  "scheduled" &&
+                  "Scheduled Emails"}
+
+                {activeSection ===
+                  "sent" &&
+                  "Sent Emails"}
+
+                {activeSection ===
+                  "compose" &&
+                  "New Campaign"}
+
+                {activeSection ===
+                  "slack" &&
+                  "Slack Integration"}
               </h1>
 
-              <p>Manage your email campaigns and delivery workflow.</p>
             </div>
 
+            <p>
+              Manage your email campaigns
+              and delivery workflow.
+            </p>
+          </div>
+
+          {/* =================================================
+              TOPBAR SEARCH
+          ================================================= */}
+
+          <div className="topbar-search-wrapper">
+
             <div
-              style={{
-                display: "flex",
-                alignItems: "center",
-                gap: 10,
-              }}
+              className={`topbar-search ${
+                searchFocused
+                  ? "search-focused"
+                  : ""
+              }`}
             >
+
+              <Search size={17} />
+
+              <input
+                type="search"
+                value={searchQuery}
+                placeholder="Search emails..."
+                aria-label="Search emails"
+                onFocus={() => {
+                  setSearchFocused(
+                    true,
+                  );
+
+                  if (
+                    searchResults.length >
+                    0
+                  ) {
+                    setSearchOpen(
+                      true,
+                    );
+                  }
+                }}
+                onBlur={() => {
+                  window.setTimeout(
+                    () => {
+                      setSearchFocused(
+                        false,
+                      );
+                    },
+                    150,
+                  );
+                }}
+                onChange={(event) => {
+                  setSearchQuery(
+                    event.target.value,
+                  );
+
+                  setSearchOpen(
+                    true,
+                  );
+                }}
+                onKeyDown={
+                  handleSearchKeyDown
+                }
+              />
+
+              {searchLoading && (
+                <RefreshCw
+                  size={15}
+                  className="dashboard-refresh-icon"
+                />
+              )}
+
+              {!searchLoading &&
+                searchQuery && (
+                  <button
+                    type="button"
+                    className="search-clear-button"
+                    onMouseDown={(
+                      event,
+                    ) => {
+                      event.preventDefault();
+                    }}
+                    onClick={
+                      clearSearch
+                    }
+                    aria-label="Clear search"
+                  >
+                    <X size={15} />
+                  </button>
+                )}
+
+              {!searchQuery && (
+                <span className="search-shortcut">
+                  <Command size={12} />
+
+                  K
+                </span>
+              )}
+            </div>
+
+            {/* =============================================
+                SEARCH DROPDOWN
+            ============================================= */}
+
+            {searchOpen &&
+              searchFocused && (
+                <div className="search-dropdown">
+
+                  {searchLoading ? (
+                    <div className="search-dropdown-loading">
+
+                      <RefreshCw
+                        size={16}
+                        className="dashboard-refresh-icon"
+                      />
+
+                      <span>
+                        Searching your
+                        email history...
+                      </span>
+
+                    </div>
+                  ) : searchError ? (
+                    <div className="search-dropdown-error">
+
+                      <span>
+                        {searchError}
+                      </span>
+
+                      <button
+                        type="button"
+                        onMouseDown={(
+                          event,
+                        ) => {
+                          event.preventDefault();
+                        }}
+                        onClick={() =>
+                          void searchEmails(
+                            searchQuery,
+                          )
+                        }
+                      >
+                        Retry
+                      </button>
+
+                    </div>
+                  ) : searchQuery.trim()
+                      .length <
+                    SEARCH_MIN_LENGTH ? (
+                    <div className="search-dropdown-empty">
+
+                      <Search
+                        size={18}
+                      />
+
+                      <div>
+                        <strong>
+                          Search your
+                          emails
+                        </strong>
+
+                        <span>
+                          Type at least{" "}
+                          {
+                            SEARCH_MIN_LENGTH
+                          }{" "}
+                          characters.
+                        </span>
+                      </div>
+
+                    </div>
+                  ) : searchResults.length ===
+                    0 ? (
+                    <div className="search-dropdown-empty">
+
+                      <FileText
+                        size={20}
+                      />
+
+                      <div>
+                        <strong>
+                          No emails found
+                        </strong>
+
+                        <span>
+                          Try another
+                          recipient,
+                          subject or
+                          keyword.
+                        </span>
+                      </div>
+
+                    </div>
+                  ) : (
+                    <>
+                      <div className="search-dropdown-header">
+
+                        <span>
+                          SEARCH RESULTS
+                        </span>
+
+                        <strong>
+                          {
+                            searchResults.length
+                          }
+                        </strong>
+
+                      </div>
+
+                      <div className="search-results-list">
+
+                        {searchResults
+                          .slice(0, 6)
+                          .map(
+                            (
+                              result,
+                            ) => (
+                              <button
+                                type="button"
+                                key={
+                                  result.emailId
+                                }
+                                className="search-result-item"
+                                onMouseDown={(
+                                  event,
+                                ) => {
+                                  event.preventDefault();
+                                }}
+                                onClick={() =>
+                                  handleSearchResultClick(
+                                    result,
+                                  )
+                                }
+                              >
+
+                                <div className="search-result-icon">
+
+                                  {result.status ===
+                                  "SENT" ? (
+                                    <Send
+                                      size={
+                                        15
+                                      }
+                                    />
+                                  ) : (
+                                    <Clock3
+                                      size={
+                                        15
+                                      }
+                                    />
+                                  )}
+
+                                </div>
+
+                                <div className="search-result-content">
+
+                                  <strong>
+                                    {
+                                      result.recipientEmail
+                                    }
+                                  </strong>
+
+                                  <span>
+                                    {
+                                      result.subject
+                                    }
+                                  </span>
+
+                                  <small>
+                                    {result.status ===
+                                    "SENT"
+                                      ? `Sent ${formatDashboardDate(
+                                          result.sentAt,
+                                        )}`
+                                      : `Scheduled ${formatDashboardDate(
+                                          result.scheduledAt,
+                                        )}`}
+                                  </small>
+
+                                </div>
+
+                                <ChevronRight
+                                  size={15}
+                                />
+
+                              </button>
+                            ),
+                          )}
+
+                      </div>
+
+                      <div className="search-dropdown-footer">
+
+                        <span>
+                          Powered by
+                          Elasticsearch
+                        </span>
+
+                        <ExternalLink
+                          size={12}
+                        />
+
+                      </div>
+                    </>
+                  )}
+
+                </div>
+              )}
+          </div>
+
+          {/* =================================================
+              TOPBAR ACTIONS
+          ================================================= */}
+
+          <div className="topbar-actions">
+
+            <button
+              type="button"
+              className="dashboard-refresh-button"
+              onClick={() =>
+                void handleRefresh()
+              }
+              title="Refresh dashboard"
+              disabled={refreshing}
+            >
+              <RefreshCw
+                size={16}
+                className={
+                  refreshing ||
+                  dataLoading
+                    ? "dashboard-refresh-icon"
+                    : ""
+                }
+              />
+
+              <span className="desktop-refresh-text">
+                Refresh
+              </span>
+            </button>
+
+            <button
+              type="button"
+              className="topbar-compose-button"
+              onClick={() =>
+                handleNavigation(
+                  "compose",
+                )
+              }
+            >
+              <Plus size={17} />
+
+              <span>
+                New Email
+              </span>
+            </button>
+
+          </div>
+        </header>
+
+        {/* =================================================
+            DASHBOARD CONTENT
+        ================================================= */}
+
+        <div className="dashboard-content">
+
+          {dataError && (
+            <div className="dashboard-data-error">
+
+              <div className="dashboard-error-message">
+
+                <span className="error-indicator" />
+
+                <span>
+                  {dataError}
+                </span>
+
+              </div>
+
               <button
                 type="button"
                 className="dashboard-refresh-button"
-                onClick={() => void loadDashboardData()}
-                title="Refresh dashboard"
+                onClick={() =>
+                  void handleRefresh()
+                }
               >
-                <RefreshCw
-                  size={16}
-                  className={dataLoading ? "dashboard-refresh-icon" : ""}
-                />
-                <span className="desktop-refresh-text">Refresh</span>
+                <RefreshCw size={15} />
+
+                Retry
               </button>
 
-              <button
-                type="button"
-                className="topbar-compose-button"
-                onClick={() => handleNavigation("compose")}
-              >
-                <Plus size={17} />
-                New Email
-              </button>
             </div>
-          </header>
+          )}
 
-          <div className="dashboard-content">
-            {dataError && (
-              <div className="dashboard-data-error">
-                <span>{dataError}</span>
+          {/* =================================================
+              OVERVIEW
+          ================================================= */}
 
-                <button
-                  type="button"
-                  className="dashboard-refresh-button"
-                  onClick={() => void loadDashboardData()}
-                >
-                  <RefreshCw size={15} />
-                  Retry
-                </button>
-              </div>
-            )}
+          {activeSection ===
+            "overview" && (
+            <OverviewContent
+              user={user}
+              stats={stats}
+              loading={dataLoading}
+              scheduledEmails={
+                scheduledEmails
+              }
+              sentEmails={
+                sentEmails
+              }
+              activityItems={
+                activityItems
+              }
+              deliveryRate={
+                deliveryRate
+              }
+              nextScheduledEmail={
+                nextScheduledEmail
+              }
+              latestSentEmail={
+                latestSentEmail
+              }
+              health={health}
+              lastUpdated={
+                lastUpdated
+              }
+              quickActions={
+                quickActions
+              }
+              onCompose={() =>
+                handleNavigation(
+                  "compose",
+                )
+              }
+              onScheduled={() =>
+                handleNavigation(
+                  "scheduled",
+                )
+              }
+              onSent={() =>
+                handleNavigation(
+                  "sent",
+                )
+              }
+              onSlack={() =>
+                handleNavigation(
+                  "slack",
+                )
+              }
+            />
+          )}
 
-            {activeSection === "overview" && (
-              <OverviewContent
-                user={user}
-                stats={stats}
-                loading={dataLoading}
-                scheduledEmails={scheduledEmails}
-                onCompose={() => handleNavigation("compose")}
-                onScheduled={() => handleNavigation("scheduled")}
-              />
-            )}
+          {/* =================================================
+              SCHEDULED
+          ================================================= */}
 
-            {activeSection === "scheduled" && (
-              <ScheduledContent
-                emails={scheduledEmails}
-                loading={dataLoading}
-                formatDate={formatDate}
-              />
-            )}
+          {activeSection ===
+            "scheduled" && (
+            <ScheduledContent
+              emails={
+                scheduledEmails
+              }
+              loading={
+                dataLoading
+              }
+              formatDate={
+                formatDate
+              }
+              onCompose={() =>
+                handleNavigation(
+                  "compose",
+                )
+              }
+              onRefresh={() =>
+                void handleRefresh()
+              }
+            />
+          )}
 
-            {activeSection === "sent" && (
-              <SentContent
-                emails={sentEmails}
-                loading={dataLoading}
-                formatDate={formatDate}
-              />
-            )}
+          {/* =================================================
+              SENT
+          ================================================= */}
 
-            {activeSection === "compose" && <ComposeContent />}
+          {activeSection ===
+            "sent" && (
+            <SentContent
+              emails={sentEmails}
+              loading={
+                dataLoading
+              }
+              formatDate={
+                formatDate
+              }
+              onRefresh={() =>
+                void handleRefresh()
+              }
+            />
+          )}
 
-            {activeSection === "slack" && <SlackContent />}
-          </div>
-        </main>
-      </div>
-    </>
+          {/* =================================================
+              COMPOSE
+          ================================================= */}
+
+          {activeSection ===
+            "compose" && (
+            <ComposeContent
+              onSuccess={() => {
+                void loadDashboardData();
+
+                handleNavigation(
+                  "scheduled",
+                );
+              }}
+            />
+          )}
+
+          {/* =================================================
+              SLACK
+          ================================================= */}
+
+          {activeSection ===
+            "slack" && (
+            <SlackContent
+              loading={
+                slackLoading
+              }
+              message={
+                slackMessage
+              }
+              connected={
+                slackConnected
+              }
+              onConnect={
+                handleSlackConnect
+              }
+            />
+          )}
+
+        </div>
+      </main>
+    </div>
   );
 };
 
+/* =========================================================
+   END OF PART 1
+========================================================= */
+/* =========================================================
+   OVERVIEW PROPS
+========================================================= */
+
 interface OverviewContentProps {
   user: User;
+
   stats: EmailStats;
+
   loading: boolean;
+
   scheduledEmails: ScheduledEmail[];
+
+  sentEmails: SentEmail[];
+
+  activityItems: ActivityItem[];
+
+  deliveryRate: number;
+
+  nextScheduledEmail:
+    | ScheduledEmail
+    | null;
+
+  latestSentEmail:
+    | SentEmail
+    | null;
+
+  health: DashboardHealth;
+
+  lastUpdated: Date | null;
+
+  quickActions: QuickAction[];
+
   onCompose: () => void;
+
   onScheduled: () => void;
+
+  onSent: () => void;
+
+  onSlack: () => void;
 }
+
+/* =========================================================
+   OVERVIEW CONTENT
+========================================================= */
 
 const OverviewContent = ({
   user,
   stats,
   loading,
   scheduledEmails,
+  sentEmails,
+  activityItems,
+  deliveryRate,
+  nextScheduledEmail,
+  latestSentEmail,
+  health,
+  lastUpdated,
+  quickActions,
   onCompose,
   onScheduled,
+  onSent,
+  onSlack,
 }: OverviewContentProps) => {
   return (
     <>
-      <section className="welcome-section">
-        <div>
-          <p className="section-eyebrow">YOUR WORKSPACE</p>
+      {/* ===================================================
+          WELCOME HERO
+      =================================================== */}
+
+      <section className="welcome-hero">
+        <div className="welcome-copy">
+          <div className="welcome-eyebrow">
+            <Sparkles size={14} />
+
+            <span>
+              YOUR EMAIL WORKSPACE
+            </span>
+          </div>
 
           <h2>
-            Welcome back, {user.name.split(" ")[0]} 👋
+            Welcome back,{" "}
+            <span>
+              {user.name
+                .split(" ")[0]}
+            </span>
           </h2>
 
           <p>
-            Here's what's happening with your email campaigns.
+            Keep your campaigns organized,
+            scheduled and moving efficiently
+            from one workspace.
           </p>
+
+          <div className="hero-meta">
+            <span className="hero-live-indicator">
+              <span />
+              Workspace active
+            </span>
+
+            {lastUpdated && (
+              <span>
+                Updated{" "}
+                {lastUpdated.toLocaleTimeString(
+                  "en-IN",
+                  {
+                    hour: "2-digit",
+                    minute: "2-digit",
+                  },
+                )}
+              </span>
+            )}
+          </div>
         </div>
 
         <button
           type="button"
-          className="primary-button"
+          className="hero-compose-button"
           onClick={onCompose}
         >
           <Plus size={18} />
-          Compose Email
+
+          <span>
+            Create Campaign
+          </span>
+
+          <ChevronRight size={17} />
         </button>
       </section>
 
-      <section className="stats-grid">
+      {/* ===================================================
+          STATISTICS
+      =================================================== */}
+
+      <section className="stats-grid premium-stats">
+
         <StatCard
-          icon={<Clock3 size={20} />}
+          icon={
+            <Clock3 size={20} />
+          }
           label="Scheduled"
-          value={loading ? "..." : String(stats.scheduled)}
-          description="Emails waiting to be sent"
+          value={
+            loading
+              ? "..."
+              : String(
+                  stats.scheduled,
+                )
+          }
+          description="Waiting for delivery"
+          trend={
+            nextScheduledEmail
+              ? `Next ${new Date(
+                  nextScheduledEmail.scheduledAt,
+                ).toLocaleTimeString(
+                  "en-IN",
+                  {
+                    hour: "2-digit",
+                    minute: "2-digit",
+                  },
+                )}`
+              : undefined
+          }
+          trendType="neutral"
         />
 
         <StatCard
-          icon={<CheckCircle2 size={20} />}
+          icon={
+            <CheckCircle2
+              size={20}
+            />
+          }
           label="Sent"
-          value={loading ? "..." : String(stats.sent)}
+          value={
+            loading
+              ? "..."
+              : String(
+                  stats.sent,
+                )
+          }
           description="Successfully delivered"
+          trend={
+            deliveryRate > 0
+              ? `${deliveryRate}% delivery activity`
+              : undefined
+          }
+          trendType="positive"
         />
 
         <StatCard
-          icon={<Send size={20} />}
+          icon={
+            <TrendingUp
+              size={20}
+            />
+          }
           label="Campaigns"
-          value={loading ? "..." : String(stats.campaigns)}
-          description="Email batches created"
+          value={
+            loading
+              ? "..."
+              : String(
+                  stats.campaigns,
+                )
+          }
+          description="Campaigns created"
+          trend={
+            stats.campaigns > 0
+              ? "Workspace active"
+              : undefined
+          }
+          trendType="neutral"
         />
+
+        <StatCard
+          icon={
+            <Zap size={20} />
+          }
+          label="Delivery Signal"
+          value={
+            health.scheduler ===
+            "active"
+              ? "Live"
+              : "Check"
+          }
+          description="Scheduler status"
+          trend={
+            health.api ===
+              "online" &&
+            health.search ===
+              "available"
+              ? "All systems ready"
+              : "Needs attention"
+          }
+          trendType={
+            health.api ===
+              "online" &&
+            health.search ===
+              "available"
+              ? "positive"
+              : "neutral"
+          }
+        />
+
       </section>
 
-      <section className="dashboard-panel">
-        <div className="panel-header">
-          <div>
-            <h3>Recent Activity</h3>
+      {/* ===================================================
+          QUICK ACTIONS
+      =================================================== */}
 
-            <p>
-              Your latest email activity will appear here.
+      <section className="quick-actions-section">
+
+        <div className="section-heading-row">
+          <div>
+            <p className="section-kicker">
+              WORKSPACE SHORTCUTS
             </p>
+
+            <h3>
+              Move faster
+            </h3>
           </div>
 
-          {scheduledEmails.length > 0 && (
-            <button
-              type="button"
-              className="dashboard-refresh-button"
-              onClick={onScheduled}
-            >
-              View all
-              <ChevronRight size={16} />
-            </button>
-          )}
+          <span className="section-heading-description">
+            Common actions for your
+            email workflow.
+          </span>
         </div>
 
-        {loading ? (
-          <div style={{ padding: "24px" }}>
-            <div className="dashboard-skeleton" />
-            <div
-              className="dashboard-skeleton"
-              style={{ marginTop: 12, width: "75%" }}
-            />
-            <div
-              className="dashboard-skeleton"
-              style={{ marginTop: 12, width: "55%" }}
-            />
-          </div>
-        ) : scheduledEmails.length === 0 ? (
-          <EmptyState
-            icon={<Mail size={28} />}
-            title="No email activity yet"
-            description="Create your first email campaign to get started."
-          />
-        ) : (
-          <div className="table-container">
-            <div className="table-header scheduled-grid">
-              <span>Email</span>
-              <span>Subject</span>
-              <span>Scheduled Time</span>
-              <span>Status</span>
-            </div>
+        <div className="quick-actions-grid">
 
-            {scheduledEmails.slice(0, 5).map((email) => (
-              <div
-                key={email.id}
-                className="table-row scheduled-grid dashboard-table-row"
+          {quickActions.map(
+            (action) => (
+              <button
+                key={action.label}
+                type="button"
+                className="quick-action-card"
+                onClick={() => {
+
+                  if (
+                    action.section ===
+                    "compose"
+                  ) {
+                    onCompose();
+                  }
+
+                  if (
+                    action.section ===
+                    "scheduled"
+                  ) {
+                    onScheduled();
+                  }
+
+                  if (
+                    action.section ===
+                    "sent"
+                  ) {
+                    onSent();
+                  }
+
+                  if (
+                    action.section ===
+                    "slack"
+                  ) {
+                    onSlack();
+                  }
+                }}
               >
-                <div className="dashboard-table-email">
-                  <div className="dashboard-email-avatar">
-                    <Mail size={16} />
-                  </div>
+                <div className="quick-action-icon">
+                  {action.icon}
+                </div>
 
-                  <span className="dashboard-email-text">
-                    {email.recipientEmail}
+                <div className="quick-action-copy">
+                  <strong>
+                    {action.label}
+                  </strong>
+
+                  <span>
+                    {action.description}
                   </span>
                 </div>
 
-                <span>{email.subject}</span>
+                <ChevronRight
+                  size={16}
+                />
+              </button>
+            ),
+          )}
+
+        </div>
+      </section>
+
+      {/* ===================================================
+          WORKSPACE INSIGHTS
+      =================================================== */}
+
+      <section className="insights-grid">
+
+        {/* =================================================
+            DELIVERY OVERVIEW
+        ================================================= */}
+
+        <div className="dashboard-panel delivery-panel">
+
+          <div className="panel-header premium-panel-header">
+
+            <div className="panel-title-group">
+
+              <div className="panel-title-icon">
+                <TrendingUp
+                  size={17}
+                />
+              </div>
+
+              <div>
+                <h3>
+                  Delivery overview
+                </h3>
+
+                <p>
+                  A quick view of your
+                  current email activity.
+                </p>
+              </div>
+
+            </div>
+
+          </div>
+
+          <div className="delivery-overview">
+
+            <div className="delivery-ring-wrapper">
+
+              <div
+                className="delivery-ring"
+                style={{
+                  background:
+                    `conic-gradient(
+                      currentColor ${
+                        deliveryRate
+                      }%,
+                      rgba(15, 23, 42, 0.08) ${
+                        deliveryRate
+                      }%
+                    )`,
+                }}
+              >
+
+                <div className="delivery-ring-inner">
+
+                  <strong>
+                    {deliveryRate}%
+                  </strong>
+
+                  <span>
+                    activity
+                  </span>
+
+                </div>
+
+              </div>
+
+            </div>
+
+            <div className="delivery-breakdown">
+
+              <div className="delivery-breakdown-item">
+
+                <span className="delivery-dot scheduled-dot" />
+
+                <div>
+                  <strong>
+                    {stats.scheduled}
+                  </strong>
+
+                  <span>
+                    Scheduled
+                  </span>
+                </div>
+
+              </div>
+
+              <div className="delivery-breakdown-item">
+
+                <span className="delivery-dot sent-dot" />
+
+                <div>
+                  <strong>
+                    {stats.sent}
+                  </strong>
+
+                  <span>
+                    Sent
+                  </span>
+                </div>
+
+              </div>
+
+              <div className="delivery-breakdown-item">
+
+                <span className="delivery-dot campaign-dot" />
+
+                <div>
+                  <strong>
+                    {stats.campaigns}
+                  </strong>
+
+                  <span>
+                    Campaigns
+                  </span>
+                </div>
+
+              </div>
+
+            </div>
+          </div>
+        </div>
+
+        {/* =================================================
+            WORKSPACE HEALTH
+        ================================================= */}
+
+        <div className="dashboard-panel system-panel">
+
+          <div className="panel-header premium-panel-header">
+
+            <div className="panel-title-group">
+
+              <div className="panel-title-icon">
+                <Activity
+                  size={17}
+                />
+              </div>
+
+              <div>
+                <h3>
+                  Workspace health
+                </h3>
+
+                <p>
+                  Core services supporting
+                  your campaigns.
+                </p>
+              </div>
+
+            </div>
+
+          </div>
+
+          <div className="health-list">
+
+            <HealthRow
+              label="API"
+              value={
+                health.api ===
+                "online"
+                  ? "Operational"
+                  : "Unavailable"
+              }
+              status={
+                health.api ===
+                "online"
+                  ? "online"
+                  : "offline"
+              }
+            />
+
+            <HealthRow
+              label="Database"
+              value={
+                health.database ===
+                "connected"
+                  ? "Connected"
+                  : "Unknown"
+              }
+              status={
+                health.database ===
+                "connected"
+                  ? "online"
+                  : "offline"
+              }
+            />
+
+            <HealthRow
+              label="Search"
+              value={
+                health.search ===
+                "available"
+                  ? "Elasticsearch ready"
+                  : "Unavailable"
+              }
+              status={
+                health.search ===
+                "available"
+                  ? "online"
+                  : "offline"
+              }
+            />
+
+            <HealthRow
+              label="Scheduler"
+              value={
+                health.scheduler ===
+                "active"
+                  ? "Processing"
+                  : "Unknown"
+              }
+              status={
+                health.scheduler ===
+                "active"
+                  ? "online"
+                  : "offline"
+              }
+            />
+
+          </div>
+        </div>
+
+      </section>
+
+      {/* ===================================================
+          CAMPAIGN PULSE
+      =================================================== */}
+
+      <section className="dashboard-panel split-insight-panel">
+
+        <div className="panel-header premium-panel-header">
+
+          <div className="panel-title-group">
+
+            <div className="panel-title-icon">
+              <CalendarClock
+                size={17}
+              />
+            </div>
+
+            <div>
+              <h3>
+                Campaign pulse
+              </h3>
+
+              <p>
+                Your next scheduled and
+                most recent email.
+              </p>
+            </div>
+
+          </div>
+
+        </div>
+
+        <div className="campaign-pulse-grid">
+
+          {/* NEXT SCHEDULED */}
+
+          <div className="pulse-card">
+
+            <span className="pulse-label">
+              NEXT SCHEDULED
+            </span>
+
+            {nextScheduledEmail ? (
+              <>
+                <strong>
+                  {
+                    nextScheduledEmail.recipientEmail
+                  }
+                </strong>
 
                 <span>
-                  {new Date(email.scheduledAt).toLocaleString("en-IN", {
-                    dateStyle: "medium",
-                    timeStyle: "short",
-                  })}
+                  {
+                    nextScheduledEmail.subject
+                  }
                 </span>
 
-                <StatusBadge status={email.status} />
-              </div>
-            ))}
+                <small>
+                  {formatDashboardShortDate(
+                    nextScheduledEmail.scheduledAt,
+                  )}{" "}
+                  at{" "}
+                  {formatDashboardTime(
+                    nextScheduledEmail.scheduledAt,
+                  )}
+                </small>
+              </>
+            ) : (
+              <>
+                <strong>
+                  Nothing scheduled
+                </strong>
+
+                <span>
+                  Your queue is currently
+                  clear.
+                </span>
+              </>
+            )}
+
+            <button
+              type="button"
+              className="inline-panel-action"
+              onClick={onScheduled}
+            >
+              View schedule
+
+              <ChevronRight
+                size={14}
+              />
+            </button>
+
+          </div>
+
+          {/* MOST RECENT SENT */}
+
+          <div className="pulse-card">
+
+            <span className="pulse-label">
+              MOST RECENT SENT
+            </span>
+
+            {latestSentEmail ? (
+              <>
+                <strong>
+                  {
+                    latestSentEmail.recipientEmail
+                  }
+                </strong>
+
+                <span>
+                  {
+                    latestSentEmail.subject
+                  }
+                </span>
+
+                <small>
+                  {latestSentEmail.sentAt
+                    ? formatDashboardDate(
+                        latestSentEmail.sentAt,
+                      )
+                    : "Sent status available"}
+                </small>
+              </>
+            ) : (
+              <>
+                <strong>
+                  No sent emails yet
+                </strong>
+
+                <span>
+                  Your delivery history
+                  will appear here.
+                </span>
+              </>
+            )}
+
+            <button
+              type="button"
+              className="inline-panel-action"
+              onClick={onSent}
+            >
+              View sent emails
+
+              <ChevronRight
+                size={14}
+              />
+            </button>
+
+          </div>
+
+        </div>
+      </section>
+
+      {/* ===================================================
+          RECENT ACTIVITY
+      =================================================== */}
+
+      <section className="dashboard-panel activity-panel">
+
+        <div className="panel-header premium-panel-header">
+
+          <div className="panel-title-group">
+
+            <div className="panel-title-icon">
+              <Activity
+                size={17}
+              />
+            </div>
+
+            <div>
+              <h3>
+                Recent activity
+              </h3>
+
+              <p>
+                The latest changes across
+                your email workspace.
+              </p>
+            </div>
+
+          </div>
+
+          <span className="panel-header-count">
+            {activityItems.length}
+          </span>
+
+        </div>
+
+        {loading ? (
+          <TableLoading rows={5} />
+        ) : activityItems.length ===
+          0 ? (
+          <EmptyState
+            icon={
+              <Mail size={28} />
+            }
+            title="No email activity yet"
+            description="Create your first campaign to start seeing activity here."
+            actionLabel="Create Campaign"
+            onAction={onCompose}
+          />
+        ) : (
+          <div className="activity-list">
+
+            {activityItems.map(
+              (activity) => (
+                <div
+                  key={activity.id}
+                  className="activity-item"
+                >
+
+                  <div
+                    className={`activity-icon activity-icon-${activity.type}`}
+                  >
+                    {activity.type ===
+                    "sent" ? (
+                      <Send
+                        size={15}
+                      />
+                    ) : activity.type ===
+                      "scheduled" ? (
+                      <Clock3
+                        size={15}
+                      />
+                    ) : (
+                      <TrendingUp
+                        size={15}
+                      />
+                    )}
+                  </div>
+
+                  <div className="activity-copy">
+
+                    <strong>
+                      {activity.title}
+                    </strong>
+
+                    <span>
+                      {
+                        activity.description
+                      }
+                    </span>
+
+                  </div>
+
+                  <time>
+                    {formatDashboardDate(
+                      activity.time,
+                    )}
+                  </time>
+
+                </div>
+              ),
+            )}
+
           </div>
         )}
+
+      </section>
+
+      {/* ===================================================
+          SMART TIP
+      =================================================== */}
+
+      <section className="smart-tip-card">
+
+        <div className="smart-tip-icon">
+          <Sparkles
+            size={18}
+          />
+        </div>
+
+        <div className="smart-tip-content">
+
+          <span>
+            SMART TIP
+          </span>
+
+          <strong>
+            Keep your campaigns organized
+          </strong>
+
+          <p>
+            Use the scheduler and delivery
+            controls to manage larger email
+            campaigns without losing visibility.
+          </p>
+
+        </div>
+
+        <button
+          type="button"
+          onClick={onCompose}
+          className="smart-tip-action"
+        >
+          Create campaign
+
+          <ChevronRight
+            size={15}
+          />
+        </button>
+
       </section>
     </>
   );
 };
 
-interface StatCardProps {
-  icon: React.ReactNode;
+/* =========================================================
+   HEALTH ROW
+========================================================= */
+
+interface HealthRowProps {
   label: string;
   value: string;
-  description: string;
+  status:
+    | "online"
+    | "offline";
 }
+
+const HealthRow = ({
+  label,
+  value,
+  status,
+}: HealthRowProps) => {
+  return (
+    <div className="health-row">
+
+      <div className="health-row-left">
+
+        <span
+          className={`health-status-dot ${
+            status === "online"
+              ? "health-online"
+              : "health-offline"
+          }`}
+        />
+
+        <span className="health-label">
+          {label}
+        </span>
+
+      </div>
+
+      <span
+        className={`health-value ${
+          status === "online"
+            ? "health-value-online"
+            : "health-value-offline"
+        }`}
+      >
+        {value}
+      </span>
+
+    </div>
+  );
+};
+
+/* =========================================================
+   STAT CARD
+========================================================= */
 
 const StatCard = ({
   icon,
   label,
   value,
   description,
+  trend,
+  trendType = "neutral",
 }: StatCardProps) => {
   return (
     <div className="stat-card">
-      <div className="stat-icon">{icon}</div>
 
-      <div>
-        <p className="stat-label">{label}</p>
-        <strong>{value}</strong>
-        <span>{description}</span>
+      <div className="stat-card-top">
+
+        <div className="stat-card-icon">
+          {icon}
+        </div>
+
+        {trend && (
+          <span
+            className={`stat-trend ${
+              trendType ===
+              "positive"
+                ? "stat-trend-positive"
+                : "stat-trend-neutral"
+            }`}
+          >
+            {trend}
+          </span>
+        )}
+
       </div>
+
+      <div className="stat-card-value">
+        {value}
+      </div>
+
+      <div className="stat-card-label">
+        {label}
+      </div>
+
+      <div className="stat-card-description">
+        {description}
+      </div>
+
     </div>
   );
 };
 
+/* =========================================================
+   STATUS BADGE
+========================================================= */
+
+const StatusBadge = ({
+  status,
+}: StatusBadgeProps) => {
+
+  const normalizedStatus =
+    status
+      .trim()
+      .toLowerCase();
+
+  const isSent =
+    normalizedStatus ===
+      "sent" ||
+    normalizedStatus ===
+      "success";
+
+  const isFailed =
+    normalizedStatus ===
+      "failed" ||
+    normalizedStatus ===
+      "failure";
+
+  const isProcessing =
+    normalizedStatus ===
+      "processing";
+
+  const isCancelled =
+    normalizedStatus ===
+      "cancelled";
+
+  let label = "Scheduled";
+
+  if (isSent) {
+    label = "Sent";
+  } else if (isFailed) {
+    label = "Failed";
+  } else if (isProcessing) {
+    label = "Processing";
+  } else if (isCancelled) {
+    label = "Cancelled";
+  }
+
+  return (
+    <span
+      className={`status-badge status-${normalizedStatus}`}
+    >
+
+      <span className="status-badge-dot" />
+
+      {label}
+
+    </span>
+  );
+};
+
+/* =========================================================
+   TABLE LOADING
+========================================================= */
+
+const TableLoading = ({
+  rows = 5,
+}: TableLoadingProps) => {
+  return (
+    <div className="table-loading">
+
+      {Array.from({
+        length: rows,
+      }).map((_, index) => (
+        <div
+          key={index}
+          className="table-loading-row"
+        >
+          <div className="loading-skeleton loading-skeleton-wide" />
+
+          <div className="loading-skeleton loading-skeleton-medium" />
+
+          <div className="loading-skeleton loading-skeleton-small" />
+
+          <div className="loading-skeleton loading-skeleton-status" />
+        </div>
+      ))}
+
+    </div>
+  );
+};
+
+/* =========================================================
+   EMPTY STATE
+========================================================= */
+
+const EmptyState = ({
+  icon,
+  title,
+  description,
+  actionLabel,
+  onAction,
+}: EmptyStateProps) => {
+  return (
+    <div className="empty-state">
+
+      <div className="empty-state-icon">
+        {icon}
+      </div>
+
+      <h3>
+        {title}
+      </h3>
+
+      <p>
+        {description}
+      </p>
+
+      {actionLabel &&
+        onAction && (
+          <button
+            type="button"
+            className="empty-state-action"
+            onClick={onAction}
+          >
+            <Plus size={16} />
+
+            {actionLabel}
+          </button>
+        )}
+
+    </div>
+  );
+};
+
+/* =========================================================
+   END OF PART 2
+========================================================= */
+/* =========================================================
+   SCHEDULED EMAILS
+========================================================= */
+
 interface ScheduledContentProps {
   emails: ScheduledEmail[];
   loading: boolean;
-  formatDate: (date: string | null) => string;
+  formatDate: (
+    date: string | null,
+  ) => string;
+  onCompose: () => void;
+  onRefresh: () => void;
 }
 
 const ScheduledContent = ({
   emails,
   loading,
   formatDate,
+  onCompose,
+  onRefresh,
 }: ScheduledContentProps) => {
   return (
-    <section className="dashboard-panel">
-      <div className="panel-header">
+    <>
+      {/* ===================================================
+          PAGE HEADER
+      =================================================== */}
+
+      <section className="content-page-header">
+
         <div>
-          <h3>Scheduled Emails</h3>
+          <div className="content-eyebrow">
+            <Clock3 size={14} />
+
+            <span>
+              DELIVERY QUEUE
+            </span>
+          </div>
+
+          <h2>
+            Scheduled Emails
+          </h2>
 
           <p>
-            Emails waiting for their scheduled delivery time.
+            Review emails waiting for
+            delivery and their scheduled
+            send times.
           </p>
         </div>
 
-        <div className="dashboard-count-badge">
-          {emails.length}
+        <div className="content-header-actions">
+
+          <button
+            type="button"
+            className="secondary-action-button"
+            onClick={onRefresh}
+          >
+            <RefreshCw
+              size={15}
+            />
+
+            Refresh
+          </button>
+
+          <button
+            type="button"
+            className="primary-action-button"
+            onClick={onCompose}
+          >
+            <Plus size={16} />
+
+            New Campaign
+          </button>
+
         </div>
+      </section>
+
+      {/* ===================================================
+          SUMMARY
+      =================================================== */}
+
+      <div className="list-summary-row">
+
+        <div className="list-summary-item">
+          <span>
+            Scheduled
+          </span>
+
+          <strong>
+            {loading
+              ? "..."
+              : emails.length}
+          </strong>
+        </div>
+
+        <div className="list-summary-item">
+          <span>
+            Queue status
+          </span>
+
+          <strong>
+            {emails.length > 0
+              ? "Active"
+              : "Clear"}
+          </strong>
+        </div>
+
       </div>
 
-      <div className="table-container">
-        <div className="table-header scheduled-grid">
-          <span>Email</span>
-          <span>Subject</span>
-          <span>Scheduled Time</span>
-          <span>Status</span>
+      {/* ===================================================
+          TABLE
+      =================================================== */}
+
+      <section className="dashboard-panel email-table-panel">
+
+        <div className="panel-header premium-panel-header">
+
+          <div className="panel-title-group">
+
+            <div className="panel-title-icon">
+              <CalendarClock
+                size={17}
+              />
+            </div>
+
+            <div>
+              <h3>
+                Upcoming deliveries
+              </h3>
+
+              <p>
+                Emails currently stored in
+                your scheduling queue.
+              </p>
+            </div>
+
+          </div>
+
+          <span className="panel-header-count">
+            {emails.length}
+          </span>
+
         </div>
 
         {loading ? (
-          <div style={{ padding: "24px" }}>
-            <div className="dashboard-skeleton" />
-            <div
-              className="dashboard-skeleton"
-              style={{ marginTop: 14 }}
-            />
-            <div
-              className="dashboard-skeleton"
-              style={{ marginTop: 14, width: "80%" }}
-            />
-          </div>
-        ) : emails.length === 0 ? (
+          <TableLoading rows={6} />
+        ) : emails.length ===
+          0 ? (
           <EmptyState
-            icon={<CalendarClock size={28} />}
+            icon={
+              <CalendarClock
+                size={28}
+              />
+            }
             title="No scheduled emails"
-            description="Scheduled emails will appear here."
+            description="You don't have any emails waiting for delivery. Create a campaign to get started."
+            actionLabel="Create Campaign"
+            onAction={onCompose}
           />
         ) : (
-          emails.map((email) => (
-            <div
-              key={email.id}
-              className="table-row scheduled-grid dashboard-table-row"
-            >
-              <div className="dashboard-table-email">
-                <div className="dashboard-email-avatar">
-                  <Mail size={16} />
-                </div>
+          <div className="email-table-wrapper">
 
-                <span className="dashboard-email-text">
-                  {email.recipientEmail}
-                </span>
-              </div>
+            <table className="email-table">
 
-              <span>{email.subject}</span>
+              <thead>
+                <tr>
+                  <th>
+                    Recipient
+                  </th>
 
-              <span>{formatDate(email.scheduledAt)}</span>
+                  <th>
+                    Subject
+                  </th>
 
-              <StatusBadge status={email.status} />
-            </div>
-          ))
+                  <th>
+                    Scheduled time
+                  </th>
+
+                  <th>
+                    Status
+                  </th>
+                </tr>
+              </thead>
+
+              <tbody>
+
+                {emails.map(
+                  (email) => (
+                    <tr
+                      key={email.id}
+                    >
+
+                      <td>
+                        <div className="recipient-cell">
+
+                          <div className="recipient-avatar">
+                            {email.recipientEmail
+                              .charAt(0)
+                              .toUpperCase()}
+                          </div>
+
+                          <div>
+                            <strong>
+                              {
+                                email.recipientName ||
+                                email.recipientEmail
+                              }
+                            </strong>
+
+                            <span>
+                              {
+                                email.recipientEmail
+                              }
+                            </span>
+                          </div>
+
+                        </div>
+                      </td>
+
+                      <td>
+                        <div className="subject-cell">
+                          <strong>
+                            {email.subject}
+                          </strong>
+
+                          <span>
+                            Scheduled delivery
+                          </span>
+                        </div>
+                      </td>
+
+                      <td>
+                        <div className="date-cell">
+                          <strong>
+                            {formatDate(
+                              email.scheduledAt,
+                            )}
+                          </strong>
+
+                          <span>
+                            Local time
+                          </span>
+                        </div>
+                      </td>
+
+                      <td>
+                        <StatusBadge
+                          status={
+                            email.status
+                          }
+                        />
+                      </td>
+
+                    </tr>
+                  ),
+                )}
+
+              </tbody>
+
+            </table>
+
+          </div>
         )}
-      </div>
-    </section>
+
+      </section>
+
+      {/* ===================================================
+          INFORMATION NOTICE
+      =================================================== */}
+
+      <DashboardNotice
+        icon={
+          <Clock3 size={17} />
+        }
+        title="Scheduled emails remain persistent"
+        description="Your scheduled emails are stored in PostgreSQL and processed through the BullMQ scheduler."
+      />
+    </>
   );
 };
+
+/* =========================================================
+   SENT EMAILS
+========================================================= */
 
 interface SentContentProps {
   emails: SentEmail[];
   loading: boolean;
-  formatDate: (date: string | null) => string;
+  formatDate: (
+    date: string | null,
+  ) => string;
+  onRefresh: () => void;
 }
 
 const SentContent = ({
   emails,
   loading,
   formatDate,
+  onRefresh,
 }: SentContentProps) => {
+  const sentCount =
+    emails.filter(
+      (email) =>
+        email.status === "SENT",
+    ).length;
+
+  const failedCount =
+    emails.filter(
+      (email) =>
+        email.status === "FAILED",
+    ).length;
+
   return (
-    <section className="dashboard-panel">
-      <div className="panel-header">
+    <>
+      {/* ===================================================
+          PAGE HEADER
+      =================================================== */}
+
+      <section className="content-page-header">
+
         <div>
-          <h3>Sent Emails</h3>
+          <div className="content-eyebrow">
+            <Send size={14} />
+
+            <span>
+              DELIVERY HISTORY
+            </span>
+          </div>
+
+          <h2>
+            Sent Emails
+          </h2>
 
           <p>
-            Track your previously delivered emails.
+            Track your completed and failed
+            email deliveries.
           </p>
         </div>
 
-        <div className="dashboard-count-badge">
-          {emails.length}
-        </div>
-      </div>
+        <div className="content-header-actions">
 
-      <div className="table-container">
-        <div className="table-header sent-grid">
-          <span>Email</span>
-          <span>Subject</span>
-          <span>Sent Time</span>
-          <span>Status</span>
+          <button
+            type="button"
+            className="secondary-action-button"
+            onClick={onRefresh}
+          >
+            <RefreshCw
+              size={15}
+            />
+
+            Refresh
+          </button>
+
+        </div>
+
+      </section>
+
+      {/* ===================================================
+          SENT SUMMARY
+      =================================================== */}
+
+      <section className="campaign-metrics-grid">
+
+        <CampaignMetric
+          icon={
+            <CheckCircle2
+              size={18}
+            />
+          }
+          label="Delivered"
+          value={
+            loading
+              ? "..."
+              : String(sentCount)
+          }
+          description="Successfully sent"
+        />
+
+        <CampaignMetric
+          icon={
+            <Send size={18} />
+          }
+          label="Total history"
+          value={
+            loading
+              ? "..."
+              : String(
+                  emails.length,
+                )
+          }
+          description="Recorded deliveries"
+        />
+
+        <CampaignMetric
+          icon={
+            <X size={18} />
+          }
+          label="Failed"
+          value={
+            loading
+              ? "..."
+              : String(failedCount)
+          }
+          description="Delivery failures"
+        />
+
+      </section>
+
+      {/* ===================================================
+          TABLE
+      =================================================== */}
+
+      <section className="dashboard-panel email-table-panel">
+
+        <div className="panel-header premium-panel-header">
+
+          <div className="panel-title-group">
+
+            <div className="panel-title-icon">
+              <Send size={17} />
+            </div>
+
+            <div>
+              <h3>
+                Delivery history
+              </h3>
+
+              <p>
+                A record of your email
+                delivery activity.
+              </p>
+            </div>
+
+          </div>
+
+          <span className="panel-header-count">
+            {emails.length}
+          </span>
+
         </div>
 
         {loading ? (
-          <div style={{ padding: "24px" }}>
-            <div className="dashboard-skeleton" />
-            <div
-              className="dashboard-skeleton"
-              style={{ marginTop: 14 }}
-            />
-            <div
-              className="dashboard-skeleton"
-              style={{ marginTop: 14, width: "80%" }}
-            />
-          </div>
-        ) : emails.length === 0 ? (
+          <TableLoading rows={6} />
+        ) : emails.length ===
+          0 ? (
           <EmptyState
-            icon={<CheckCircle2 size={28} />}
-            title="No sent emails"
-            description="Successfully sent emails will appear here."
+            icon={
+              <Send size={28} />
+            }
+            title="No sent emails yet"
+            description="Once your scheduled emails are delivered, they'll appear here."
           />
         ) : (
-          emails.map((email) => (
-            <div
-              key={email.id}
-              className="table-row sent-grid dashboard-table-row"
-            >
-              <div className="dashboard-table-email">
-                <div className="dashboard-email-avatar">
-                  <Send size={16} />
+          <div className="email-table-wrapper">
+
+            <table className="email-table">
+
+              <thead>
+                <tr>
+                  <th>
+                    Recipient
+                  </th>
+
+                  <th>
+                    Subject
+                  </th>
+
+                  <th>
+                    Sent time
+                  </th>
+
+                  <th>
+                    Status
+                  </th>
+                </tr>
+              </thead>
+
+              <tbody>
+
+                {emails.map(
+                  (email) => (
+                    <tr
+                      key={email.id}
+                    >
+
+                      <td>
+                        <div className="recipient-cell">
+
+                          <div className="recipient-avatar">
+                            {email.recipientEmail
+                              .charAt(0)
+                              .toUpperCase()}
+                          </div>
+
+                          <div>
+                            <strong>
+                              {
+                                email.recipientName ||
+                                email.recipientEmail
+                              }
+                            </strong>
+
+                            <span>
+                              {
+                                email.recipientEmail
+                              }
+                            </span>
+                          </div>
+
+                        </div>
+                      </td>
+
+                      <td>
+                        <div className="subject-cell">
+                          <strong>
+                            {email.subject}
+                          </strong>
+
+                          <span>
+                            Email delivery
+                          </span>
+                        </div>
+                      </td>
+
+                      <td>
+                        <div className="date-cell">
+
+                          <strong>
+                            {formatDate(
+                              email.sentAt,
+                            )}
+                          </strong>
+
+                          <span>
+                            Delivery time
+                          </span>
+
+                        </div>
+                      </td>
+
+                      <td>
+                        <StatusBadge
+                          status={
+                            email.status
+                          }
+                        />
+                      </td>
+
+                    </tr>
+                  ),
+                )}
+
+              </tbody>
+
+            </table>
+
+          </div>
+        )}
+
+      </section>
+
+      <DashboardNotice
+        icon={
+          <Search size={17} />
+        }
+        title="Search your delivery history"
+        description="Use the Elasticsearch-powered search box in the dashboard header to find recipients, subjects and email content."
+      />
+    </>
+  );
+};
+
+/* =========================================================
+   COMPOSE CONTENT
+========================================================= */
+
+interface ComposeContentProps {
+  onSuccess: () => void;
+}
+
+const ComposeContent = ({
+  onSuccess,
+}: ComposeContentProps) => {
+  return (
+    <>
+      {/* ===================================================
+          PAGE HEADER
+      =================================================== */}
+
+      <section className="content-page-header">
+
+        <div>
+          <div className="content-eyebrow">
+            <Plus size={14} />
+
+            <span>
+              CAMPAIGN BUILDER
+            </span>
+          </div>
+
+          <h2>
+            New Campaign
+          </h2>
+
+          <p>
+            Create a scheduled email campaign
+            and control its delivery rate.
+          </p>
+        </div>
+
+      </section>
+
+      {/* ===================================================
+          CAMPAIGN BUILDER
+      =================================================== */}
+
+      <section className="compose-layout">
+
+        <div className="compose-main-card">
+
+          <div className="compose-card-header">
+
+            <div className="compose-card-icon">
+              <Mail size={19} />
+            </div>
+
+            <div>
+              <h3>
+                Compose your campaign
+              </h3>
+
+              <p>
+                Add your message, recipients
+                and delivery settings.
+              </p>
+            </div>
+
+          </div>
+
+          <div className="compose-form-wrapper">
+
+            <ComposeEmailForm />
+
+          </div>
+
+        </div>
+
+        {/* =================================================
+            CAMPAIGN GUIDANCE
+        ================================================= */}
+
+        <aside className="compose-side-column">
+
+          <div className="dashboard-panel compose-guide-panel">
+
+            <div className="panel-header premium-panel-header">
+
+              <div className="panel-title-group">
+
+                <div className="panel-title-icon">
+                  <Sparkles
+                    size={17}
+                  />
                 </div>
 
-                <span className="dashboard-email-text">
-                  {email.recipientEmail}
-                </span>
+                <div>
+                  <h3>
+                    Campaign guide
+                  </h3>
+
+                  <p>
+                    A few things to keep
+                    in mind.
+                  </p>
+                </div>
               </div>
 
-              <span>{email.subject}</span>
-
-              <span>{formatDate(email.sentAt)}</span>
-
-              <StatusBadge status={email.status} />
             </div>
-          ))
-        )}
-      </div>
-    </section>
+
+            <div className="guide-list">
+
+              <div className="guide-item">
+
+                <span className="guide-number">
+                  01
+                </span>
+
+                <div>
+                  <strong>
+                    Upload recipients
+                  </strong>
+
+                  <p>
+                    Import your leads from
+                    the supported file format.
+                  </p>
+                </div>
+
+              </div>
+
+              <div className="guide-item">
+
+                <span className="guide-number">
+                  02
+                </span>
+
+                <div>
+                  <strong>
+                    Choose timing
+                  </strong>
+
+                  <p>
+                    Set a future start time
+                    for your campaign.
+                  </p>
+                </div>
+
+              </div>
+
+              <div className="guide-item">
+
+                <span className="guide-number">
+                  03
+                </span>
+
+                <div>
+                  <strong>
+                    Control delivery
+                  </strong>
+
+                  <p>
+                    Configure delay and
+                    hourly sending limits.
+                  </p>
+                </div>
+
+              </div>
+
+              <div className="guide-item">
+
+                <span className="guide-number">
+                  04
+                </span>
+
+                <div>
+                  <strong>
+                    Monitor results
+                  </strong>
+
+                  <p>
+                    Track scheduled and sent
+                    emails from your dashboard.
+                  </p>
+                </div>
+
+              </div>
+
+            </div>
+
+          </div>
+
+          <div className="dashboard-panel compose-reliability-panel">
+
+            <div className="reliability-icon">
+              <CheckCircle2
+                size={19}
+              />
+            </div>
+
+            <div>
+              <strong>
+                Reliable scheduling
+              </strong>
+
+              <p>
+                Campaigns are persisted before
+                they enter the delivery queue.
+              </p>
+            </div>
+
+          </div>
+
+        </aside>
+
+      </section>
+
+      {/* ===================================================
+          COMPOSE FOOTER NOTICE
+      =================================================== */}
+
+      <DashboardNotice
+        icon={
+          <Zap size={17} />
+        }
+        title="Built for controlled delivery"
+        description="Your campaign settings determine the spacing and hourly sending capacity used by the backend scheduler."
+      />
+    </>
   );
 };
 
-const StatusBadge = ({ status }: { status: string }) => {
-  const normalizedStatus = status.toUpperCase();
+/* =========================================================
+   SLACK CONTENT
+========================================================= */
 
-  let className = "status-scheduled";
+interface SlackContentProps {
+  loading: boolean;
+  message: string;
+  connected: boolean;
+  onConnect: () => void;
+}
 
-  if (normalizedStatus === "SENT") {
-    className = "status-sent";
-  } else if (normalizedStatus === "FAILED") {
-    className = "status-failed";
-  } else if (normalizedStatus === "PROCESSING") {
-    className = "status-processing";
-  }
-
+const SlackContent = ({
+  loading,
+  message,
+  connected,
+  onConnect,
+}: SlackContentProps) => {
   return (
-    <span className={`status-pill ${className}`}>
-      <span className="status-dot" />
-      {normalizedStatus}
-    </span>
-  );
-};
+    <>
+      {/* ===================================================
+          PAGE HEADER
+      =================================================== */}
 
-const ComposeContent = () => {
-  return (
-    <section className="compose-layout">
-      <div className="dashboard-panel compose-panel">
-        <div className="panel-header">
+      <section className="content-page-header">
+
+        <div>
+          <div className="content-eyebrow">
+            <MessageSquare
+              size={14}
+            />
+
+            <span>
+              INTEGRATIONS
+            </span>
+          </div>
+
+          <h2>
+            Slack Integration
+          </h2>
+
+          <p>
+            Receive notifications when your
+            email sending limit is reached.
+          </p>
+        </div>
+
+      </section>
+
+      {/* ===================================================
+          SLACK HERO
+      =================================================== */}
+
+      <section className="slack-hero-card">
+
+        <div className="slack-hero-content">
+
+          <div className="slack-brand-icon">
+            <MessageSquare
+              size={28}
+            />
+          </div>
+
           <div>
-            <h3>Compose New Email</h3>
+
+            <div className="slack-status-label">
+
+              <span
+                className={
+                  connected
+                    ? "slack-connected-dot"
+                    : "slack-disconnected-dot"
+                }
+              />
+
+              {connected
+                ? "Connected"
+                : "Not connected"}
+
+            </div>
+
+            <h3>
+              Stay informed about
+              campaign limits
+            </h3>
 
             <p>
-              Create and schedule an email campaign.
+              Connect Slack to receive a
+              notification when your hourly
+              sending limit is reached.
+            </p>
+
+          </div>
+
+        </div>
+
+        <button
+          type="button"
+          className={
+            connected
+              ? "slack-connected-button"
+              : "slack-connect-button"
+          }
+          onClick={onConnect}
+          disabled={
+            loading ||
+            connected
+          }
+        >
+          {loading ? (
+            <>
+              <RefreshCw
+                size={16}
+                className="dashboard-refresh-icon"
+              />
+
+              Connecting...
+            </>
+          ) : connected ? (
+            <>
+              <CheckCircle2
+                size={16}
+              />
+
+              Slack Connected
+            </>
+          ) : (
+            <>
+              <MessageSquare
+                size={16}
+              />
+
+              Connect Slack
+            </>
+          )}
+        </button>
+
+      </section>
+
+      {/* ===================================================
+          MESSAGE
+      =================================================== */}
+
+      {message && (
+        <div
+          className={`slack-feedback ${
+            message
+              .toLowerCase()
+              .includes("unable")
+              ? "slack-feedback-error"
+              : "slack-feedback-success"
+          }`}
+        >
+          {message}
+        </div>
+      )}
+
+      {/* ===================================================
+          SLACK FEATURES
+      =================================================== */}
+
+      <section className="slack-feature-grid">
+
+        <div className="dashboard-panel slack-feature-card">
+
+          <div className="slack-feature-icon">
+            <Zap size={18} />
+          </div>
+
+          <h3>
+            Hourly limit alerts
+          </h3>
+
+          <p>
+            Get notified when your configured
+            hourly email capacity is reached.
+          </p>
+
+        </div>
+
+        <div className="dashboard-panel slack-feature-card">
+
+          <div className="slack-feature-icon">
+            <Activity size={18} />
+          </div>
+
+          <h3>
+            Delivery visibility
+          </h3>
+
+          <p>
+            Stay aware of delivery throttling
+            without continuously watching the
+            dashboard.
+          </p>
+
+        </div>
+
+        <div className="dashboard-panel slack-feature-card">
+
+          <div className="slack-feature-icon">
+            <CheckCircle2
+              size={18}
+            />
+          </div>
+
+          <h3>
+            Safe connection
+          </h3>
+
+          <p>
+            Slack notifications are optional.
+            Email scheduling continues normally
+            when Slack is not connected.
+          </p>
+
+        </div>
+
+      </section>
+
+      {/* ===================================================
+          HOW IT WORKS
+      =================================================== */}
+
+      <section className="dashboard-panel slack-how-panel">
+
+        <div className="panel-header premium-panel-header">
+
+          <div className="panel-title-group">
+
+            <div className="panel-title-icon">
+              <Command
+                size={17}
+              />
+            </div>
+
+            <div>
+              <h3>
+                How it works
+              </h3>
+
+              <p>
+                Slack notifications are
+                triggered by the backend rate
+                limiter.
+              </p>
+            </div>
+
+          </div>
+
+        </div>
+
+        <div className="slack-flow">
+
+          <div className="slack-flow-step">
+            <span>
+              01
+            </span>
+
+            <strong>
+              Campaign sends
+            </strong>
+
+            <p>
+              Emails are processed through the
+              BullMQ worker.
             </p>
           </div>
+
+          <ChevronRight
+            size={18}
+            className="slack-flow-arrow"
+          />
+
+          <div className="slack-flow-step">
+            <span>
+              02
+            </span>
+
+            <strong>
+              Limit reached
+            </strong>
+
+            <p>
+              Redis-backed rate limiting delays
+              the next available email.
+            </p>
+          </div>
+
+          <ChevronRight
+            size={18}
+            className="slack-flow-arrow"
+          />
+
+          <div className="slack-flow-step">
+            <span>
+              03
+            </span>
+
+            <strong>
+              Slack alert
+            </strong>
+
+            <p>
+              Slack receives the hourly-limit
+              notification.
+            </p>
+          </div>
+
         </div>
 
-        <div className="compose-form-container">
-          <ComposeEmailForm />
-        </div>
-      </div>
-    </section>
+      </section>
+    </>
   );
 };
 
-const SlackContent = () => {
+/* =========================================================
+   SEARCH RESULT PREVIEW
+========================================================= */
+
+interface SearchResultPreviewProps {
+  result: SearchResult;
+  onOpen: () => void;
+}
+
+const SearchResultPreview = ({
+  result,
+  onOpen,
+}: SearchResultPreviewProps) => {
   return (
-    <section className="dashboard-panel slack-panel">
-      <div className="slack-icon">
-        <MessageSquare size={28} />
+    <button
+      type="button"
+      className="search-result-preview"
+      onClick={onOpen}
+    >
+
+      <div className="search-preview-icon">
+
+        {result.status ===
+        "SENT" ? (
+          <Send size={16} />
+        ) : (
+          <Clock3 size={16} />
+        )}
+
       </div>
 
-      <h2>Connect Slack</h2>
+      <div className="search-preview-content">
+
+        <strong>
+          {result.recipientEmail}
+        </strong>
+
+        <span>
+          {result.subject}
+        </span>
+
+        <small>
+          {result.status ===
+          "SENT"
+            ? "Sent email"
+            : "Scheduled email"}
+        </small>
+
+      </div>
+
+      <ChevronRight
+        size={16}
+      />
+
+    </button>
+  );
+};
+
+/* =========================================================
+   SEARCH EMPTY STATE
+========================================================= */
+
+interface SearchEmptyStateProps {
+  query: string;
+}
+
+const SearchEmptyState = ({
+  query,
+}: SearchEmptyStateProps) => {
+  return (
+    <div className="search-empty-state">
+
+      <div className="search-empty-icon">
+        <Search size={20} />
+      </div>
+
+      <strong>
+        No matching emails
+      </strong>
 
       <p>
-        Receive a Slack notification when your email sending
-        limit is reached.
+        No email matched "
+        {query}
+        ".
       </p>
 
-      <button type="button" className="primary-button">
-        <MessageSquare size={18} />
-        Connect Slack
-      </button>
-
-      <span className="integration-note">
-        Slack integration will be connected through OAuth.
-      </span>
-    </section>
+    </div>
   );
 };
 
-interface EmptyStateProps {
+/* =========================================================
+   CAMPAIGN METRIC
+========================================================= */
+
+interface CampaignMetricProps {
+  icon: React.ReactNode;
+  label: string;
+  value: string;
+  description: string;
+}
+
+const CampaignMetric = ({
+  icon,
+  label,
+  value,
+  description,
+}: CampaignMetricProps) => {
+  return (
+    <div className="campaign-metric-card">
+
+      <div className="campaign-metric-icon">
+        {icon}
+      </div>
+
+      <div className="campaign-metric-copy">
+
+        <span>
+          {label}
+        </span>
+
+        <strong>
+          {value}
+        </strong>
+
+        <small>
+          {description}
+        </small>
+
+      </div>
+
+    </div>
+  );
+};
+
+/* =========================================================
+   EMAIL PREVIEW CARD
+========================================================= */
+
+interface EmailPreviewCardProps {
+  email: {
+    recipientEmail: string;
+    recipientName?: string | null;
+    subject: string;
+    body?: string;
+    status: string;
+    scheduledAt?: string;
+    sentAt?: string | null;
+  };
+}
+
+const EmailPreviewCard = ({
+  email,
+}: EmailPreviewCardProps) => {
+  return (
+    <div className="email-preview-card">
+
+      <div className="email-preview-header">
+
+        <div className="email-preview-avatar">
+          {email.recipientEmail
+            .charAt(0)
+            .toUpperCase()}
+        </div>
+
+        <div>
+          <strong>
+            {email.recipientName ||
+              email.recipientEmail}
+          </strong>
+
+          <span>
+            {email.recipientEmail}
+          </span>
+        </div>
+
+        <StatusBadge
+          status={email.status}
+        />
+
+      </div>
+
+      <div className="email-preview-subject">
+        {email.subject}
+      </div>
+
+      {email.body && (
+        <p className="email-preview-body">
+          {email.body}
+        </p>
+      )}
+
+    </div>
+  );
+};
+
+/* =========================================================
+   DASHBOARD NOTICE
+========================================================= */
+
+interface DashboardNoticeProps {
   icon: React.ReactNode;
   title: string;
   description: string;
 }
 
-const EmptyState = ({
+const DashboardNotice = ({
   icon,
   title,
   description,
-}: EmptyStateProps) => {
+}: DashboardNoticeProps) => {
   return (
-    <div className="empty-state">
-      <div className="empty-state-icon dashboard-empty-icon">
+    <div className="dashboard-notice">
+
+      <div className="dashboard-notice-icon">
         {icon}
       </div>
 
-      <h4>{title}</h4>
+      <div className="dashboard-notice-content">
 
-      <p>{description}</p>
+        <strong>
+          {title}
+        </strong>
+
+        <p>
+          {description}
+        </p>
+
+      </div>
+
     </div>
   );
 };
+
+/* =========================================================
+   DASHBOARD FOOTER
+========================================================= */
+
+const DashboardFooter = () => {
+  return (
+    <footer className="dashboard-footer">
+
+      <div className="dashboard-footer-brand">
+
+        <div className="dashboard-footer-mark">
+          <Mail size={14} />
+        </div>
+
+        <span>
+          ReachInbox
+        </span>
+
+      </div>
+
+      <div className="dashboard-footer-meta">
+        Email operations workspace
+      </div>
+
+    </footer>
+  );
+};
+
+/* =========================================================
+   FINAL EXPORT
+========================================================= */
 
 export default DashboardPage;
