@@ -4,8 +4,8 @@
     "module": "NodeNext",
     "moduleResolution": "NodeNext",
 
-    "rootDir": "src",
-    "outDir": "dist",
+    "rootDir": ".",
+    "outDir": "./dist",
 
     "strict": true,
     "esModuleInterop": true,
@@ -23,7 +23,8 @@
   },
 
   "include": [
-    "src/**/*.ts"
+    "src/**/*.ts",
+    "generated/**/*.ts"
   ],
 
   "exclude": [
