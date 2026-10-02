@@ -698,3 +698,11 @@ https://github.com/Chandanadm/ReachInbox_Assignment
 ## 📄 License
 
 This project was developed as a software engineering assignment and demonstration project.
+
+
+
+## 🌐 Live Deployment
+
+- 🚀 [Live Application](https://reach-inbox-assignment-three.vercel.app/)
+- ⚙️ [Backend API](https://reachinbox-assignment-t7ms.onrender.com)
+- 📦 [GitHub Repository](https://github.com/Chandanadm/ReachInbox_Assignment)
