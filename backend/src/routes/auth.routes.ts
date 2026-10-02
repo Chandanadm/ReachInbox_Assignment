@@ -31,7 +31,7 @@ router.get(
     session: false,
 
     failureRedirect:
-      "http://localhost:5174/login?error=google_auth_failed",
+      `${process.env.FRONTEND_URL}/login?error=google_auth_failed`,
   }),
 
   (req, res) => {
@@ -44,14 +44,9 @@ router.get(
 
     const token = createAuthToken(user);
 
-    /*
-     * IMPORTANT:
-     * The React frontend is running on port 5174.
-     *
-     * Therefore Google OAuth must return to the
-     * frontend, NOT to the backend on port 5000.
-     */
-    const frontendUrl = "http://localhost:5174";
+    const frontendUrl =
+      process.env.FRONTEND_URL ||
+      "http://localhost:5174";
 
     res.redirect(
       `${frontendUrl}/auth/callback?token=${encodeURIComponent(
